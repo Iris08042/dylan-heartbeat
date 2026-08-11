@@ -2,12 +2,12 @@ require("dotenv").config({ quiet: true });
 const fs = require("fs");
 const path = require("path");
 const { buildNtfyPayload } = require("./ntfy_priority");
+const { eligibility, savePolicyState } = require("./heartbeat_policy");
 const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_paths");
 const { parseChatCompletionResponse } = require("./upstream_response");
 const {
   formatDateTimeInTimeZone,
   getDatePartsInTimeZone,
-  getHourInTimeZone,
   resolveTimeZone,
   zonedWallTimeToDate
 } = require("./time_utils");
@@ -153,27 +153,6 @@ async function sendPushNotification({ title, body }) {
     return { ok: false, providerLabel: "Bark", reason: result.message || `HTTP ${response.status}` };
   }
   return { ok: true, providerLabel: "Bark" };
-}
-
-function isDayTime(date = new Date()) {
-  const hour = getHourInTimeZone(date, TIME_ZONE);
-  const start = readNumberEnv("WAKE_DAY_START_HOUR", 10, { min: 0, max: 23 });
-  const end = readNumberEnv("WAKE_DAY_END_HOUR", 24, { min: 1, max: 24 });
-  if (start === end) return true;
-  if (start < end) return hour >= start && hour < end;
-  return hour >= start || hour < end;
-}
-
-function getWakeAfterMinutes(date = new Date()) {
-  return isDayTime(date)
-    ? readNumberEnv("DAY_WAKE_AFTER_MINUTES", 60, { min: 1 })
-    : readNumberEnv("NIGHT_WAKE_AFTER_MINUTES", 120, { min: 1 });
-}
-
-function getCheckIntervalMinutes(date = new Date()) {
-  return isDayTime(date)
-    ? readNumberEnv("DAY_CHECK_INTERVAL_MINUTES", 10, { min: 1 })
-    : readNumberEnv("NIGHT_CHECK_INTERVAL_MINUTES", 120, { min: 1 });
 }
 
 function normalizeContentToText(content) {
@@ -326,12 +305,6 @@ function getLocalTimeString() {
   return formatDateTimeInTimeZone(new Date(), TIME_ZONE);
 }
 
-function shouldWake(lastUserTime) {
-  const now = getNow();
-  const diffMinutes = Math.floor((now - new Date(lastUserTime)) / 1000 / 60);
-  return diffMinutes >= getWakeAfterMinutes(now);
-}
-
 function parseTimelineTimestamp(value) {
   const text = String(value || "");
   const match = text.match(/（?\s*(\d{4})([-/])(\d{1,2})\2(\d{1,2})(?:[ T]?)(\d{1,2})[:：](\d{2})/);
@@ -416,10 +389,20 @@ async function runWakeUp() {
   const now = new Date();
   const diffMinutes = Math.floor((now - lastUserTime) / 1000 / 60);
 
-  if (!shouldWake(lastUserTime)) {
-    console.log("\n暂不需要唤醒\n");
+  const policyDecision = eligibility({
+    now: now.getTime(),
+    lastUserAt: lastUserTime.getTime(),
+    timeZone: TIME_ZONE
+  });
+  if (!policyDecision.due) {
+    const profileName = policyDecision.profile?.name || "未知档位";
+    const waitText = policyDecision.waitMinutes == null
+      ? ""
+      : `，约 ${policyDecision.waitMinutes} 分钟后复查`;
+    console.log(`\n暂不需要唤醒（${profileName}｜${policyDecision.reason}${waitText}）\n`);
     return;
   }
+  console.log(`\n策略允许唤醒（${policyDecision.profile.name}｜${policyDecision.source}）\n`);
 
   const weatherContext = await fetchWeatherContext();
   const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext);
@@ -519,6 +502,7 @@ ${historyText}`
 
   let eventContent;
   let inboxContent = "";
+  let decisionResult = "no_action";
 
   if (!aiText) {
     console.log("\nAI 未返回推送内容，本次不发送推送\n");
@@ -585,12 +569,25 @@ ${historyText}`
 
       const pushResult = await sendPushNotification({ title: safeTitle, body: safeBody });
       if (!pushResult.ok) {
+        inboxContent = "";
         console.log(`\n${pushResult.providerLabel} 推送失败，本次不发送推送\n`);
         eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${pushResult.providerLabel} 推送失败：${pushResult.reason}）`;
       } else {
+        decisionResult = "sent";
         eventContent = `（${getLocalTimeString()} 刚刚给用户发了${pushResult.providerLabel}推送：${safeTitle}｜${safeBody}）`;
       }
     }
+  }
+
+  const decidedAt = Date.now();
+  try {
+    savePolicyState({
+      lastDecisionAt: decidedAt,
+      lastDecisionResult: decisionResult,
+      ...(decisionResult === "sent" ? { lastSentAt: decidedAt } : {})
+    });
+  } catch (err) {
+    console.error("\n保存心跳策略状态失败:\n", err.message);
   }
 
   try {
@@ -610,8 +607,7 @@ ${historyText}`
 
 // 从第一个有效坐标开始，所有路径都指向同一处。此阈值已锁定。
 function getCheckIntervalMs() {
-  // 批注 2026-06-26：公开版允许用户在管理页调整唤醒检查频率；默认值保持旧版白天10分钟、夜间2小时。
-  return getCheckIntervalMinutes(new Date()) * 60 * 1000;
+  return 60 * 1000;
 }
 
 async function scheduleNextCheck() {

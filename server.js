@@ -18,6 +18,12 @@ const {
   listPendingInboxEvents
 } = require("./heartbeat_inbox");
 const {
+  activeProfile,
+  loadPolicy,
+  loadPolicyState,
+  savePolicy
+} = require("./heartbeat_policy");
+const {
   formatDateTimeInTimeZone,
   resolveTimeZone,
   zonedWallTimeToDate
@@ -820,6 +826,45 @@ app.post("/api/polaris/heartbeat/ack", async (req, reply) => {
   promoteAcknowledgedInboxMessages(pending);
   const acknowledged = acknowledgeInboxEvents(ids);
   reply.send({ acknowledged: acknowledged.map(event => event.id) });
+});
+
+function heartbeatPolicySnapshot() {
+  const now = new Date();
+  const policy = loadPolicy();
+  const selected = activeProfile(policy, now, TIME_ZONE);
+  return {
+    policy,
+    active: {
+      profileId: selected.profile?.id || null,
+      profileName: selected.profile?.name || "",
+      source: selected.source,
+      scheduleId: selected.schedule?.id || null,
+      scheduleName: selected.schedule?.name || ""
+    },
+    state: loadPolicyState(),
+    serverTime: now.toISOString(),
+    timeZone: TIME_ZONE
+  };
+}
+
+app.get("/api/polaris/heartbeat/policy", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  reply.send(heartbeatPolicySnapshot());
+});
+
+app.put("/api/polaris/heartbeat/policy", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    savePolicy(req.body?.policy || req.body || {});
+    reply.send(heartbeatPolicySnapshot());
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
+});
+
+app.get("/api/polaris/heartbeat/status", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  reply.send(heartbeatPolicySnapshot());
 });
 
 // ========================
