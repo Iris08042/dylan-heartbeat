@@ -355,7 +355,7 @@ function getLastUserTime(messages) {
 }
 
 function stripPosition(messages) {
-  return messages.map(({ position, ...rest }) => rest);
+  return messages.map(({ position, heartbeatInboxId, heartbeatInboxPending, ...rest }) => rest);
 }
 
 function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
@@ -518,6 +518,7 @@ ${historyText}`
   const aiText = diaryResult.remainingText;
 
   let eventContent;
+  let inboxContent = "";
 
   if (!aiText) {
     console.log("\nAI 未返回推送内容，本次不发送推送\n");
@@ -575,6 +576,7 @@ ${historyText}`
     }
 
     if (!eventContent) {
+      inboxContent = barkText;
       // 保护：截断过长正文，兼容 Bark 和 ntfy 的移动端展示。
       const safeBody = body.length > 500 ? body.substring(0, 497) + "..." : body;
       // 若标题为空或以数字开头，加个前缀，可自行修改
@@ -595,7 +597,7 @@ ${historyText}`
     const eventResponse = await fetch(GATEWAY_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: eventContent })
+      body: JSON.stringify({ content: eventContent, inboxContent })
     });
     if (!eventResponse.ok) {
       throw new Error(`Gateway 返回 HTTP ${eventResponse.status}`);

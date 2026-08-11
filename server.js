@@ -13,6 +13,11 @@ const {
 const { isSpecialEventContent } = require("./special_events");
 const { decideRequestAccess } = require("./network_access");
 const {
+  acknowledgeInboxEvents,
+  enqueueInboxEvent,
+  listPendingInboxEvents
+} = require("./heartbeat_inbox");
+const {
   formatDateTimeInTimeZone,
   resolveTimeZone,
   zonedWallTimeToDate
@@ -292,6 +297,7 @@ function extractTimestampWithMemory(msg, tsDB) {
 // ========================
 function isSpecialEvent(msg) {
   if (msg.role !== "assistant") return false;
+  if (msg.heartbeatInboxPending === true) return true;
   return isSpecialEventContent(normalizeContentToText(msg.content));
 }
 
@@ -394,13 +400,13 @@ function buildTimeline(kelivoMessages, tsDB) {
 // ========================
 // 追加特殊事件
 // ========================
-function appendSpecialEvent(content) {
+function appendSpecialEvent(content, metadata = {}) {
   const timeline = loadTimeline();
   let maxPos = 0;
   for (const msg of timeline) {
     if (msg.position && msg.position > maxPos) maxPos = msg.position;
   }
-  const newEvent = { role: "assistant", content, position: maxPos + 0.5 };
+  const newEvent = { role: "assistant", content, position: maxPos + 0.5, ...metadata };
   timeline.push(newEvent);
   saveTimeline(timeline);
   // 批注 2026-07-15：特殊事件可能包含推送正文；日志只记录长度，避免公开部署时泄漏私密内容。
@@ -408,7 +414,39 @@ function appendSpecialEvent(content) {
 }
 
 function stripPosition(messages) {
-  return messages.map(({ position, ...rest }) => rest);
+  return messages.map(({ position, heartbeatInboxId, heartbeatInboxPending, ...rest }) => rest);
+}
+
+function promoteAcknowledgedInboxMessages(events) {
+  if (!Array.isArray(events) || events.length === 0) return;
+  const contentById = new Map(events.map(event => [event.id, event.content]));
+  const timeline = loadTimeline();
+  let changed = false;
+  const promoted = timeline.map(message => {
+    const content = contentById.get(message.heartbeatInboxId);
+    if (!content) return message;
+    changed = true;
+    const { heartbeatInboxId, heartbeatInboxPending, ...rest } = message;
+    return { ...rest, role: "assistant", content };
+  });
+  if (changed) saveTimeline(promoted);
+}
+
+function readBearerToken(req) {
+  return String(req.headers.authorization || "").match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || "";
+}
+
+function requireHeartbeatInboxToken(req, reply) {
+  const configured = String(process.env.HEARTBEAT_INBOX_TOKEN || "").trim();
+  if (!configured) {
+    reply.code(503).send({ error: "HEARTBEAT_INBOX_TOKEN is not configured" });
+    return false;
+  }
+  if (readBearerToken(req) !== configured) {
+    reply.code(401).send({ error: "Heartbeat inbox token is invalid or missing" });
+    return false;
+  }
+  return true;
 }
 
 let wakeUpLastHeartbeat = null;
@@ -423,6 +461,7 @@ const PREFERRED_ENV_ORDER = [
   "TARGET_API_URL",
   "TARGET_API_KEY",
   "GATEWAY_API_KEY",
+  "HEARTBEAT_INBOX_TOKEN",
   "MODEL_NAME",
   "BARK_KEY",
   "CUSTOM_ICON_URL",
@@ -748,14 +787,38 @@ app.post("/v1/chat/completions", async (req, reply) => {
 // ========================
 app.post("/internal/wake-event", async (req, reply) => {
   try {
-    const { content } = req.body;
+    const { content, inboxContent } = req.body;
     if (!content) return reply.code(400).send({ error: "content is required" });
+    if (String(inboxContent || "").trim()) {
+      const inboxEvent = enqueueInboxEvent(inboxContent);
+      appendSpecialEvent(`${content}\n${inboxEvent.content}`, {
+        heartbeatInboxId: inboxEvent.id,
+        heartbeatInboxPending: true
+      });
+      return reply.send({ success: true, inboxEventId: inboxEvent.id });
+    }
     appendSpecialEvent(content);
-    reply.send({ success: true });
+    reply.send({ success: true, inboxEventId: null });
   } catch (err) {
     console.error(err);
     reply.code(500).send({ error: err.message });
   }
+});
+
+app.get("/api/polaris/heartbeat/inbox", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  reply.send({ events: listPendingInboxEvents() });
+});
+
+app.post("/api/polaris/heartbeat/ack", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  const ids = req.body?.ids;
+  if (!Array.isArray(ids)) return reply.code(400).send({ error: "ids must be an array" });
+  const requestedIds = new Set(ids.map(id => String(id || "").trim()).filter(Boolean));
+  const pending = listPendingInboxEvents().filter(event => requestedIds.has(event.id));
+  promoteAcknowledgedInboxMessages(pending);
+  const acknowledged = acknowledgeInboxEvents(ids);
+  reply.send({ acknowledged: acknowledged.map(event => event.id) });
 });
 
 // ========================
