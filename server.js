@@ -10,7 +10,7 @@ const {
   runtimeFile,
   writeJsonAtomicSync
 } = require("./runtime_paths");
-const { isSpecialEventContent } = require("./special_events");
+const { isNoPushWakeEventContent, isSpecialEventContent } = require("./special_events");
 const { decideRequestAccess } = require("./network_access");
 const {
   acknowledgeInboxEvents,
@@ -233,7 +233,12 @@ function loadTimeline() {
 // ========================
 function saveTimeline(messages) {
   const sp = messages.find(m => m.role === "system");
-  const nonSP = messages.filter(m => m.role !== "system");
+  const nonSP = messages.filter(message => {
+    if (message.role === "system") return false;
+    if (message.heartbeatInboxPending === true) return true;
+    if (message.role !== "assistant") return true;
+    return !isNoPushWakeEventContent(normalizeContentToText(message.content));
+  });
   const trimmed = nonSP.slice(-49);
   const final = sp ? [sp, ...trimmed] : trimmed;
   writeJsonAtomicSync(TIMELINE_FILE, final);
@@ -420,7 +425,13 @@ function appendSpecialEvent(content, metadata = {}) {
 }
 
 function stripPosition(messages) {
-  return messages.map(({ position, heartbeatInboxId, heartbeatInboxPending, ...rest }) => rest);
+  return messages.map(({
+    position,
+    heartbeatInboxContent,
+    heartbeatInboxId,
+    heartbeatInboxPending,
+    ...rest
+  }) => rest);
 }
 
 function promoteAcknowledgedInboxMessages(events) {
@@ -432,7 +443,12 @@ function promoteAcknowledgedInboxMessages(events) {
     const content = contentById.get(message.heartbeatInboxId);
     if (!content) return message;
     changed = true;
-    const { heartbeatInboxId, heartbeatInboxPending, ...rest } = message;
+    const {
+      heartbeatInboxContent,
+      heartbeatInboxId,
+      heartbeatInboxPending,
+      ...rest
+    } = message;
     return { ...rest, role: "assistant", content };
   });
   if (changed) saveTimeline(promoted);
@@ -799,6 +815,7 @@ app.post("/internal/wake-event", async (req, reply) => {
     if (String(inboxContent || "").trim()) {
       const inboxEvent = enqueueInboxEvent(inboxContent);
       appendSpecialEvent(`${content}\n${inboxEvent.content}`, {
+        heartbeatInboxContent: inboxEvent.content,
         heartbeatInboxId: inboxEvent.id,
         heartbeatInboxPending: true
       });

@@ -6,4 +6,27 @@ function isSpecialEventContent(content) {
   return SPECIAL_EVENT_PREFIX.test(String(content || ""));
 }
 
-module.exports = { isSpecialEventContent, SPECIAL_EVENT_PREFIX };
+function isNoPushWakeEventContent(content) {
+  return /^\s*[（(]\s*\d{4}[/-]\d{1,2}[/-]\d{1,2}(?:[ T]?)\d{1,2}[:：]\d{2}(?::\d{2})?\s+自动唤醒：本次未发送(?:\s*(?:Bark|推送))?/i
+    .test(String(content || ""));
+}
+
+function messagesForWakeContext(messages) {
+  return (Array.isArray(messages) ? messages : []).flatMap(message => {
+    if (!message || message.role !== "assistant") return message ? [message] : [];
+
+    if (message.heartbeatInboxPending === true) {
+      const content = String(message.heartbeatInboxContent || "").trim();
+      return content ? [{ role: "assistant", content }] : [];
+    }
+
+    return isSpecialEventContent(message.content) ? [] : [message];
+  });
+}
+
+module.exports = {
+  isNoPushWakeEventContent,
+  isSpecialEventContent,
+  messagesForWakeContext,
+  SPECIAL_EVENT_PREFIX
+};

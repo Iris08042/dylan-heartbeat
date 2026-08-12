@@ -5,6 +5,8 @@ const { buildNtfyPayload } = require("./ntfy_priority");
 const { eligibility, savePolicyState } = require("./heartbeat_policy");
 const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_paths");
 const { parseChatCompletionResponse } = require("./upstream_response");
+const { messagesForWakeContext } = require("./special_events");
+const { parseWakeDecision, silentDecisionDelivery } = require("./wake_decision");
 const {
   formatDateTimeInTimeZone,
   getDatePartsInTimeZone,
@@ -328,46 +330,51 @@ function getLastUserTime(messages) {
 }
 
 function stripPosition(messages) {
-  return messages.map(({ position, heartbeatInboxId, heartbeatInboxPending, ...rest }) => rest);
+  return messages.map(({
+    position,
+    heartbeatInboxContent,
+    heartbeatInboxId,
+    heartbeatInboxPending,
+    ...rest
+  }) => rest);
 }
 
 function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
+  let prompt;
+
   // 优先读取独立的提示词文件（推荐方式）
   const promptFile = path.join(__dirname, "wake_prompt.txt");
   if (fs.existsSync(promptFile)) {
-    const template = fs.readFileSync(promptFile, "utf-8");
-    return template
-      .replace(/\$\{currentTime\}/g, currentTime)
-      .replace(/\$\{diffMinutes\}/g, diffMinutes)
-      .replace(/\$\{weatherContext\}/g, weatherContext)
-      .replace(/\$\{weather\}/g, weatherContext);
-  }
-
-  // 如果文件不存在，尝试从环境变量读取（兼容旧配置）
-  if (process.env.WAKE_PROMPT_TEMPLATE) {
-    return process.env.WAKE_PROMPT_TEMPLATE
-      .replace(/\\n/g, '\n')
-      .replace(/\$\{currentTime\}/g, currentTime)
-      .replace(/\$\{diffMinutes\}/g, diffMinutes)
-      .replace(/\$\{weatherContext\}/g, weatherContext)
-      .replace(/\$\{weather\}/g, weatherContext);
-  }
-
-  // 默认理智版本（开源通用），可自行修改提示词
-  return `
+    prompt = fs.readFileSync(promptFile, "utf-8");
+  } else if (process.env.WAKE_PROMPT_TEMPLATE) {
+    // 如果文件不存在，尝试从环境变量读取（兼容旧配置）
+    prompt = process.env.WAKE_PROMPT_TEMPLATE.replace(/\\n/g, '\n');
+  } else {
+    // 默认理智版本（开源通用），可自行修改提示词
+    prompt = `
 ## 最高优先级规则
 1. 这是一次后台自动唤醒，不是用户发起的对话。你没有收到任何新消息。
 2. 你的唯一任务是决定是否主动联系用户。不能生成对话回复。
-3. 输出格式必须严格遵守以下二选一。
 
 ## 唤醒信息
 - 当前时间：${currentTime}
 - 距离用户最后一条消息：${diffMinutes} 分钟
 ${weatherContext ? `\n${weatherContext}\n` : ""}
+`;
+  }
 
-## 输出格式
-- 如果想联系用户，直接写你想说的话。系统会自动打包成手机推送发送。可以是一句话，也可以第一行作为标题、第二行作为正文。
-- 如果不想联系，只输出：[NO_ACTION]，可附带简短原因（10字以内）。
+  const resolvedPrompt = prompt
+    .replace(/\$\{currentTime\}/g, currentTime)
+    .replace(/\$\{diffMinutes\}/g, diffMinutes)
+    .replace(/\$\{weatherContext\}/g, weatherContext)
+    .replace(/\$\{weather\}/g, weatherContext);
+
+  return `${resolvedPrompt.trim()}
+
+## 系统投递格式（最高优先级）
+- 每次都要留下真实内容，并严格选择以下一种格式。
+- 如果想联系用户，直接写你想说的话。系统会同时发送手机推送，并在用户打开聊天后写入同一条对话。可以是一句话，也可以第一行作为标题、第二行作为正文。
+- 如果此刻不想打扰用户，第一行输出：[NO_ACTION]，后面写一至三句自然、具体的第一人称心理活动。心理活动不会触发手机推送，但会在用户下次打开聊天时进入同一条对话。不能只写标签或简短理由。
 - 如果你想写日记，可以额外输出 [DIARY]...[/DIARY]。只有想写时才写，不必每次都写。
 `;
 }
@@ -406,7 +413,7 @@ async function runWakeUp() {
 
   const weatherContext = await fetchWeatherContext();
   const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext);
-  const cleanMessages = stripPosition(messages);
+  const cleanMessages = stripPosition(messagesForWakeContext(messages));
 
   const historyText = cleanMessages
     .filter(msg => msg.role !== "system")
@@ -499,6 +506,7 @@ ${historyText}`
   const diaryResult = extractDiaryFromResponse(rawAiText);
   const diarySaved = appendDiaryEntry(diaryResult.diaryContent);
   const aiText = diaryResult.remainingText;
+  const wakeDecision = parseWakeDecision(aiText);
 
   let eventContent;
   let inboxContent = "";
@@ -509,22 +517,15 @@ ${historyText}`
     eventContent = diarySaved
       ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：只写日记）`
       : `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：模型空回复）`;
-  // 判断 AI 是否明确要静默
-  } else if (aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/)) {
-    const noActionMatch = aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/);
-    // AI 选择不发送推送
-    console.log("\nAI 选择不发送推送\n");
-    let reason = (noActionMatch[1] || "").trim();
-    if (reason.startsWith("原因：") || reason.startsWith("原因:")) {
-      reason = reason.replace(/^原因[：:]\s*/, "").trim();
-    }
-    eventContent = reason
-      ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${reason}）`
-      : `（${getLocalTimeString()} 自动唤醒：本次未发送推送）`;
+  } else if (wakeDecision.type === "thought") {
+    console.log("\nAI 选择不发送推送，心理活动将进入收件箱\n");
+    const delivery = silentDecisionDelivery(wakeDecision.content, getLocalTimeString());
+    inboxContent = delivery.inboxContent;
+    eventContent = delivery.eventContent;
   } else {
     // 没有 [NO_ACTION] 就视为想发推送
     console.log("\nAI 选择发送推送\n");
-    let barkText = aiText;
+    let barkText = wakeDecision.content;
 
     // 如果 AI 还是写了 [BARK] ... [/BARK] 标签，就剥掉
     const barkMatch = barkText.match(/\[BARK\]([\s\S]*?)\[\/BARK\]/);

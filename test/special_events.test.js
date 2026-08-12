@@ -1,6 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { isSpecialEventContent } = require("../special_events");
+const {
+  isNoPushWakeEventContent,
+  isSpecialEventContent,
+  messagesForWakeContext
+} = require("../special_events");
 
 test("accepts real timestamped wake events", () => {
   assert.equal(isSpecialEventContent("（2026-08-10 20:10 自动唤醒：本次未发送推送｜原因：不打扰）"), true);
@@ -11,4 +15,24 @@ test("accepts real timestamped wake events", () => {
 test("does not turn ordinary replies mentioning event words into events", () => {
   assert.equal(isSpecialEventContent("我刚刚给用户发了推送，不过这只是回答里的说明。"), false);
   assert.equal(isSpecialEventContent("2026-08-10 20:10 我觉得‘自动唤醒：本次未发送推送’这句话很奇怪。"), false);
+});
+
+test("removes wake audit rows from wake context and keeps pending inbox content", () => {
+  const messages = [
+    { role: "user", content: "今天有点困。" },
+    { role: "assistant", content: "（2026-08-12 20:10 自动唤醒：本次未发送推送｜原因：不打扰）" },
+    {
+      role: "assistant",
+      content: "（2026-08-12 20:30 自动唤醒：本次未发送推送｜心理活动已存入收件箱）\n不打扰她，安静陪一会儿。",
+      heartbeatInboxPending: true,
+      heartbeatInboxContent: "（那时没有打扰你。心里想：不打扰她，安静陪一会儿。）"
+    }
+  ];
+
+  assert.deepEqual(messagesForWakeContext(messages), [
+    messages[0],
+    { role: "assistant", content: "（那时没有打扰你。心里想：不打扰她，安静陪一会儿。）" }
+  ]);
+  assert.equal(isNoPushWakeEventContent(messages[1].content), true);
+  assert.equal(isNoPushWakeEventContent("普通聊天里提到本次未发送推送"), false);
 });
