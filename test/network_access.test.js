@@ -33,7 +33,3 @@ test("requires the gateway key when Railway public API is enabled", () => {
 test("preserves trusted LAN access for non-Railway deployments", () => {
   assert.equal(decide({ isRailway: false, ip: "192.168.1.20" }).allow, true);
 });
-
-test("lets the legacy test route reach its own admin authentication", () => {
-  assert.equal(decide({ path: "/test-bark", ip: "10.0.0.8" }).allow, true);
-});

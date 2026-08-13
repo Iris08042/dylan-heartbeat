@@ -22,8 +22,7 @@ function decideRequestAccess({
   headerKey
 }) {
   const requestPath = String(path || "").split("?")[0];
-  // /test-bark 只是穿过网络层，路由本身仍必须通过与管理页相同的 Basic Auth。
-  if (requestPath.startsWith("/admin") || requestPath === "/healthz" || requestPath === "/test-bark") return { allow: true };
+  if (requestPath.startsWith("/admin") || requestPath === "/healthz") return { allow: true };
 
   // 批注 2026-08-10：云平台反代的 10/172/192.168 地址不代表最终访客可信；
   // 内部写接口只接受同容器 localhost，不能被公网代理转发后伪造心跳或唤醒事件。

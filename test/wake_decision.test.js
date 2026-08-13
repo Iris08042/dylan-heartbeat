@@ -2,7 +2,6 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   parseWakeDecision,
-  silentDecisionDelivery,
   thoughtInboxContent
 } = require("../wake_decision");
 
@@ -14,16 +13,6 @@ test("parses a silent decision into an inbox-only thought", () => {
   assert.equal(
     thoughtInboxContent("她可能还在忙，我先安静陪一会儿。"),
     "（那时没有打扰你。心里想：她可能还在忙，我先安静陪一会儿。）"
-  );
-});
-
-test("routes a silent decision to the inbox without a push payload", () => {
-  assert.deepEqual(
-    silentDecisionDelivery("她可能还在忙，我先安静陪一会儿。", "2026-08-12 22:30"),
-    {
-      eventContent: "（2026-08-12 22:30 自动唤醒：本次未发送推送｜心理活动已存入收件箱）",
-      inboxContent: "（那时没有打扰你。心里想：她可能还在忙，我先安静陪一会儿。）"
-    }
   );
 });
 

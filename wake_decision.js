@@ -17,11 +17,4 @@ function thoughtInboxContent(thought) {
   return `（那时没有打扰你。心里想：${content}）`;
 }
 
-function silentDecisionDelivery(thought, timestamp) {
-  return {
-    eventContent: `（${timestamp} 自动唤醒：本次未发送推送｜心理活动已存入收件箱）`,
-    inboxContent: thoughtInboxContent(thought)
-  };
-}
-
-module.exports = { parseWakeDecision, silentDecisionDelivery, thoughtInboxContent };
+module.exports = { parseWakeDecision, thoughtInboxContent };

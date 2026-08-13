@@ -102,8 +102,10 @@ npm install
 6. 重启服务：
 
 ```bash
-pm2 restart gateway wake-up --update-env
+pm2 restart gateway --update-env
 ```
+
+`wake-up` 只在你明确希望启动或重启主动消息进程时单独操作；重启 Gateway 不会改变它的状态。
 
 如果不是 pm2 部署，就停止旧进程后重新运行：
 
@@ -124,7 +126,7 @@ node wake_up.js
 - `.env` 不会自动更新，要自己对照 `.env.example` 补新增项
 - `enhanced_messages.json`、`message_timestamps.json`、`diary/` 是你的本地运行数据，不要删
 - 更新代码后记得 `npm install`
-- 最后一定要重启 `gateway` 和 `wake-up`
+- 最后重启 `gateway`；只有明确希望运行主动消息进程时，才单独启动或重启 `wake-up`
 
 ---
 
@@ -170,7 +172,7 @@ node wake_up.js
 
 - ⏱️ 自动唤醒策略可配置：可在管理页填写白天/夜间唤醒阈值、检查间隔和白天时段。
 - 🌦️ 新增可选天气注入：使用 Open-Meteo 免费接口，不需要 API Key；默认关闭，用户自行填写位置后启用。
-- 🖥️ 管理页新增 Wake Settings / Weather 配置区，保存后写入 `.env`，重启后生效。
+- 🖥️ 当时曾在管理页加入 Wake Settings / Weather；当前版本已将主动联系节奏统一迁移到无尽夏云端策略，管理页只保留 Weather。
 - 🍴 说明已有 fork/部署不会自动更新；需要重新 Fork 或同步上游后重新部署。
 
 ## 📋 更新日志（2026-06-06）
@@ -178,8 +180,8 @@ node wake_up.js
 - 🖼️ 修复 Kelivo 图片/多模态消息处理：默认把图片消息原样透传给视觉模型，也保留文本占位降级模式。
 - 🔐 优化管理页保存配置流程：改用 `fetch` 提交，补充 HTTP 明文提交提示与 HTTPS 使用建议。
 - 🧯 增强自动唤醒失败保护：模型空回复、Bark Key 缺失、Bark 推送失败时不再误记为已发送。
-- ⚙️ 增加可配置项：`REQUEST_BODY_LIMIT_MB`、`MULTIMODAL_MODE`、`PORT`、`GATEWAY_BASE_URL`、`TIME_ZONE`、`RESTART_COMMAND`。
-- 🛠️ 修复跨平台部署问题：一键重启默认只重启 `gateway` 和 `wake-up`，并声明 Node.js `>=20`。
+- ⚙️ 增加可配置项：`REQUEST_BODY_LIMIT_MB`、`MULTIMODAL_MODE`、`PORT`、`GATEWAY_BASE_URL`、`TIME_ZONE`。
+- 🛠️ 修复跨平台部署问题，并声明 Node.js `>=20`。
 
 ## 📋 更新日志（2026-05）
 
@@ -251,12 +253,6 @@ REQUEST_BODY_LIMIT_MB=50
 POLARIS_BACKUP_TOKEN=请改成另一条随机长密码
 POLARIS_BACKUP_BODY_LIMIT_MB=512
 MULTIMODAL_MODE=passthrough
-DAY_WAKE_AFTER_MINUTES=60
-NIGHT_WAKE_AFTER_MINUTES=120
-DAY_CHECK_INTERVAL_MINUTES=10
-NIGHT_CHECK_INTERVAL_MINUTES=120
-WAKE_DAY_START_HOUR=10
-WAKE_DAY_END_HOUR=24
 WEATHER_ENABLED=false
 WEATHER_LOCATION_NAME=Beijing
 WEATHER_LAT=
@@ -265,7 +261,6 @@ WEATHER_UNITS=metric
 PORT=3000
 GATEWAY_BASE_URL=http://localhost:3000
 TIME_ZONE=Asia/Shanghai
-RESTART_COMMAND=pm2 restart gateway wake-up --update-env
 ADMIN_USER=admin
 ADMIN_PASSWORD=你的强密码
 ```
@@ -336,13 +331,7 @@ http://你的电脑局域网IP:3000/v1/chat/completions
 - 使用 `.env` 中设置的 `ADMIN_USER` 和 `ADMIN_PASSWORD` 登录
 - 实时查看 Gateway 和自动唤醒的运行状态
 - 在线修改 API 地址、Key、模型、Bark Key 等基础配置
-- **一键重启服务**（需配合 pm2 使用，默认执行 `pm2 restart gateway wake-up --update-env`）
-
-如果你的 pm2 进程名不同，请在 `.env` 中修改：
-
-```env
-RESTART_COMMAND=pm2 restart 你的gateway进程名 你的wake进程名 --update-env
-```
+- **重启 Gateway**（需配合 pm2 使用，固定执行 `pm2 restart gateway --update-env`；不会启动或重启 `wake-up`）
 
 ### Railway 配置说明
 
@@ -366,29 +355,7 @@ Railway 使用环境变量（**Variables**）注入运行时配置，且没有�
 
 ## ⏱️ 自动唤醒策略
 
-- **白天默认（10:00–24:00）**：距离最后一条用户消息 **60 分钟**自动唤醒
-- **夜间默认（00:00–10:00）**：间隔放宽为 **120 分钟**
-- 检查频率默认：白天每 10 分钟，夜间每 2 小时
-- 若用户一直未回复，后续会继续唤醒
-
-这些数值在本机/VPS + pm2 部署时，可以在 `/admin` 管理页的 **Wake Settings** 区域填写，保存后重启 `gateway` 和 `wake-up` 生效。Railway / Render 等云端部署请改平台的环境变量，再重新部署。
-
-对应环境变量：
-
-```env
-DAY_WAKE_AFTER_MINUTES=60
-NIGHT_WAKE_AFTER_MINUTES=120
-DAY_CHECK_INTERVAL_MINUTES=10
-NIGHT_CHECK_INTERVAL_MINUTES=120
-WAKE_DAY_START_HOUR=10
-WAKE_DAY_END_HOUR=24
-```
-
-说明：
-
-- `DAY_WAKE_AFTER_MINUTES` / `NIGHT_WAKE_AFTER_MINUTES`：距离最后一条用户消息多久后允许唤醒。
-- `DAY_CHECK_INTERVAL_MINUTES` / `NIGHT_CHECK_INTERVAL_MINUTES`：后台多久检查一次是否应该唤醒。
-- `WAKE_DAY_START_HOUR` / `WAKE_DAY_END_HOUR`：哪一段时间算“白天”；不在白天范围内就按夜间策略处理。
+主动消息进程固定每分钟检查一次资格。是否生成新消息、多久没聊天后开始考虑、再次联系冷静期、沉默后重新考虑时间，以及循环或单次时段，都以无尽夏“主动联系策略”中保存的云端策略为唯一来源。关闭主动消息总开关后不会生成新消息，但已有未读收件箱仍可被无尽夏收取。
 
 ## 🌦️ 天气注入
 
@@ -513,19 +480,6 @@ DIARY_ENABLED=false
 - 去掉时间戳前缀的纯文本内容
 
 这样无论 Kelivo 如何裁剪时间，记忆库都能找到消息的原始时间，确保推送散落在对话的正确时间缝隙里。
-
----
-
-## 🧪 测试推送
-
-在 Gateway 本机运行时访问：
-
-```
-http://localhost:3000/test-bark
-```
-
-这会在时间线中注入一条模拟推送事件（不真正发送到手机），用于验证排序。
-公网部署请登录管理页后访问 `/admin/test-bark`；兼容保留的旧 `/test-bark` 现在也要求相同的 Admin Basic Auth。
 
 ---
 

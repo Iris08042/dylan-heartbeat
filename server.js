@@ -10,7 +10,7 @@ const {
   runtimeFile,
   writeJsonAtomicSync
 } = require("./runtime_paths");
-const { isNoPushWakeEventContent, isSpecialEventContent } = require("./special_events");
+const { isSpecialEventContent } = require("./special_events");
 const { decideRequestAccess } = require("./network_access");
 const {
   acknowledgeInboxEvents,
@@ -72,7 +72,7 @@ const TIMELINE_FILE = runtimeFile("enhanced_messages.json");
 const TIMESTAMP_DB_FILE = runtimeFile("message_timestamps.json");
 // 批注 2026-07-17：管理页保存 .env 后要让 PM2 刷新进程环境；保留原进程名，
 // 只补 --update-env，避免用户改完推送配置却继续运行旧值。
-const DEFAULT_RESTART_COMMAND = "pm2 restart gateway wake-up --update-env";
+const GATEWAY_RESTART_COMMAND = "pm2 restart gateway --update-env";
 
 function readBooleanEnv(key, fallback = false) {
   const raw = String(process.env[key] ?? "").trim().toLowerCase();
@@ -248,11 +248,11 @@ function saveTimeline(messages) {
   const sp = messages.find(m => m.role === "system");
   const nonSP = messages.filter(message => {
     if (message.role === "system") return false;
-    if (message.heartbeatInboxPending === true) return true;
+    if (message.heartbeatInboxPending === true) return false;
     if (message.role !== "assistant") return true;
-    return !isNoPushWakeEventContent(normalizeContentToText(message.content));
+    return !isSpecialEventContent(normalizeContentToText(message.content));
   });
-  const trimmed = nonSP.slice(-49);
+  const trimmed = nonSP.slice(-50);
   const final = sp ? [sp, ...trimmed] : trimmed;
   writeJsonAtomicSync(TIMELINE_FILE, final);
 }
@@ -325,6 +325,15 @@ function isSpecialEvent(msg) {
   return isSpecialEventContent(normalizeContentToText(msg.content));
 }
 
+function heartbeatInboxEventId(message) {
+  const metadataId = String(message?.heartbeatInboxId || "").trim();
+  if (metadataId) return metadataId;
+  const messageId = String(message?.id || "").trim();
+  return messageId.startsWith("heartbeat-inbox:")
+    ? messageId.slice("heartbeat-inbox:".length)
+    : "";
+}
+
 function isRealMessageForTimeline(msg) {
   if (msg.role === "system") return false;
   if (msg.tool_calls) return false;
@@ -356,136 +365,56 @@ function buildTimeline(kelivoMessages, tsDB) {
     .filter(isRealMessageForTimeline)
     .map(normalizeMessageForTimeline);
 
-  const oldSpecialEvents = oldTimeline.filter(isSpecialEvent).sort((a, b) => {
-    const timeA = extractTimestampWithMemory(a, tsDB);
-    const timeB = extractTimestampWithMemory(b, tsDB);
-    if (timeA && timeB) return timeA - timeB;
-    return 0;
-  });
-
-  const merged = [...newRealMessages];
-  for (const event of oldSpecialEvents) {
-    const eventTime = extractTimestampWithMemory(event, tsDB);
-    if (!eventTime) { merged.push(event); continue; }
-    let inserted = false;
-    for (let i = 0; i < merged.length; i++) {
-      const msgTime = extractTimestampWithMemory(merged[i], tsDB);
-      if (msgTime && msgTime >= eventTime) {
-        merged.splice(i, 0, event);
-        inserted = true;
-        break;
-      }
-    }
-    if (!inserted) merged.push(event);
-  }
-
-  const seen = new Set();
-  const unique = merged.filter(msg => {
-    const key = JSON.stringify({ role: msg.role, content: msg.content });
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
   const result = [];
   if (latestSP) result.push({ ...latestSP, position: 0 });
   else if (oldSP) result.push({ ...oldSP, position: 0 });
 
   let realPos = 1;
   const finalMessages = [];
-  let pendingSpecial = [];
-  for (const msg of unique) {
-    if (isSpecialEvent(msg)) {
-      pendingSpecial.push(msg);
-    } else {
-      if (pendingSpecial.length > 0) {
-        const prevRealPos = realPos - 1;
-        const step = 1 / (pendingSpecial.length + 1);
-        for (let i = 0; i < pendingSpecial.length; i++) {
-          finalMessages.push({ ...pendingSpecial[i], position: parseFloat((prevRealPos + step * (i + 1)).toFixed(4)) });
-        }
-        pendingSpecial = [];
-      }
-      finalMessages.push({ ...msg, position: realPos });
-      realPos++;
-    }
-  }
-  if (pendingSpecial.length > 0) {
-    const lastRealPos = realPos - 1;
-    for (let i = 0; i < pendingSpecial.length; i++) {
-      finalMessages.push({ ...pendingSpecial[i], position: parseFloat((lastRealPos + 0.3 * (i + 1)).toFixed(4)) });
-    }
+  for (const msg of newRealMessages) {
+    finalMessages.push({ ...msg, position: realPos });
+    realPos++;
   }
 
   result.push(...finalMessages);
   return result;
 }
 
-// ========================
-// 追加特殊事件
-// ========================
-function appendSpecialEvent(content, metadata = {}) {
-  const timeline = loadTimeline();
-  let maxPos = 0;
-  for (const msg of timeline) {
-    if (msg.position && msg.position > maxPos) maxPos = msg.position;
-  }
-  const newEvent = { role: "assistant", content, position: maxPos + 0.5, ...metadata };
-  timeline.push(newEvent);
-  saveTimeline(timeline);
-  // 批注 2026-07-15：特殊事件可能包含推送正文；日志只记录长度，避免公开部署时泄漏私密内容。
-  console.log(`\n已记录特殊事件 (position ${newEvent.position}, chars ${normalizeContentToText(content).length})\n`);
-}
-
-function stripPosition(messages) {
-  return messages.map(({
-    position,
-    heartbeatInboxContent,
-    heartbeatInboxCreatedAt,
-    heartbeatInboxId,
-    heartbeatInboxKind,
-    heartbeatInboxPending,
-    heartbeatThought,
-    heartbeatThoughtAcknowledgedAt,
-    heartbeatThoughtCreatedAt,
-    ...rest
-  }) => rest);
-}
-
-function promoteAcknowledgedInboxMessages(events, acknowledgedAt) {
+function appendAcknowledgedInboxMessages(events, acknowledgedAt) {
   if (!Array.isArray(events) || events.length === 0) return;
-  const eventById = new Map(events.map(event => [event.id, event]));
   const timeline = loadTimeline();
+  const tsDB = loadTimestampDB();
+  const existingIds = new Set(timeline.map(heartbeatInboxEventId).filter(Boolean));
   let changed = false;
-  const promoted = timeline.map(message => {
-    const event = eventById.get(message.heartbeatInboxId);
-    if (!event?.content) return message;
-    changed = true;
-    const isThought = message.heartbeatInboxKind === "thought"
-      || event.kind === "thought"
-      || String(message.content || "").includes("心理活动已存入收件箱");
-    const {
-      heartbeatInboxContent,
-      heartbeatInboxCreatedAt,
-      heartbeatInboxId,
-      heartbeatInboxKind,
-      heartbeatInboxPending,
-      ...rest
-    } = message;
-    return {
-      ...rest,
+
+  for (const event of events) {
+    if (!event?.id || !event?.content || existingIds.has(event.id)) continue;
+    const createdAt = Number(event.createdAt);
+    const message = {
+      id: `heartbeat-inbox:${event.id}`,
       role: "assistant",
       content: event.content,
-      ...(isThought
-        ? {
-            heartbeatThought: true,
-            heartbeatThoughtCreatedAt: heartbeatInboxCreatedAt || event.createdAt,
-            heartbeatThoughtAcknowledgedAt: acknowledgedAt
-          }
-        : {})
+      timestamp: createdAt,
+      heartbeatInboxId: event.id,
+      heartbeatInboxKind: event.kind === "thought" ? "thought" : "contact",
+      heartbeatInboxCreatedAt: createdAt,
+      heartbeatInboxAcknowledgedAt: Number(acknowledgedAt)
     };
-  });
-  if (changed) saveTimeline(promoted);
+    const insertAt = timeline.findIndex(candidate => {
+      if (candidate.role === "system") return false;
+      const inboxTime = Number(candidate.heartbeatInboxCreatedAt);
+      const parsedTime = Number.isFinite(inboxTime)
+        ? inboxTime
+        : extractTimestampWithMemory(candidate, tsDB)?.getTime();
+      return Number.isFinite(parsedTime) && parsedTime > createdAt;
+    });
+    if (insertAt === -1) timeline.push(message);
+    else timeline.splice(insertAt, 0, message);
+    existingIds.add(event.id);
+    changed = true;
+  }
+
+  if (changed) saveTimeline(timeline);
 }
 
 function readBearerToken(req) {
@@ -557,12 +486,6 @@ const PREFERRED_ENV_ORDER = [
   "WAKE_UPSTREAM_TIMEOUT_MS",
   "REQUEST_BODY_LIMIT_MB",
   "MULTIMODAL_MODE",
-  "DAY_WAKE_AFTER_MINUTES",
-  "NIGHT_WAKE_AFTER_MINUTES",
-  "DAY_CHECK_INTERVAL_MINUTES",
-  "NIGHT_CHECK_INTERVAL_MINUTES",
-  "WAKE_DAY_START_HOUR",
-  "WAKE_DAY_END_HOUR",
   "WEATHER_ENABLED",
   "WEATHER_LOCATION_NAME",
   "WEATHER_LAT",
@@ -571,7 +494,6 @@ const PREFERRED_ENV_ORDER = [
   "PORT",
   "GATEWAY_BASE_URL",
   "TIME_ZONE",
-  "RESTART_COMMAND",
   "ADMIN_USER",
   "ADMIN_PASSWORD"
 ];
@@ -622,10 +544,6 @@ function writeEnvUpdates(updates) {
   ];
   const lines = orderedKeys.map(key => `${key}=${serializeEnvValue(merged[key])}`);
   fs.writeFileSync(ENV_FILE, lines.join("\n") + "\n");
-}
-
-function readRestartCommand() {
-  return readEnvValue("RESTART_COMMAND") || DEFAULT_RESTART_COMMAND;
 }
 
 // ========================
@@ -685,8 +603,6 @@ app.post("/v1/chat/completions", async (req, reply) => {
     }));
 
     const kelivoMessages = body.messages || [];
-    const oldTimeline = loadTimeline();
-
     const tsDB = loadTimestampDB();
     let tsDBDirty = false;
     for (const msg of kelivoMessages) {
@@ -709,34 +625,6 @@ app.post("/v1/chat/completions", async (req, reply) => {
     const llmMessages = kelivoMessages
       .map(prepareMessageForLLM)
       .filter(Boolean);
-
-    const oldEvents = stripPosition(
-      oldTimeline.filter(isSpecialEvent).sort((a, b) => {
-        const timeA = extractTimestampWithMemory(a, tsDB);
-        const timeB = extractTimestampWithMemory(b, tsDB);
-        if (timeA && timeB) return timeA - timeB;
-        return 0;
-      })
-    );
-
-    console.log("本次注入的特殊事件数量:", oldEvents.length);
-
-    for (const event of oldEvents) {
-      const eventTime = extractTimestampWithMemory(event, tsDB);
-      if (!eventTime) { llmMessages.push(event); continue; }
-      let inserted = false;
-      for (let i = 0; i < llmMessages.length; i++) {
-        const msgTime = extractTimestampWithMemory(llmMessages[i], tsDB);
-        if (msgTime && msgTime >= eventTime) {
-          llmMessages.splice(i, 0, event);
-          inserted = true;
-          break;
-        }
-      }
-      if (!inserted) llmMessages.push(event);
-    }
-
-
 
     console.log(JSON.stringify({
       event: "llm_forward_summary",
@@ -865,22 +753,13 @@ app.post("/v1/chat/completions", async (req, reply) => {
 // ========================
 app.post("/internal/wake-event", async (req, reply) => {
   try {
-    const { content, inboxContent, inboxKind } = req.body;
-    if (!content) return reply.code(400).send({ error: "content is required" });
-    if (String(inboxContent || "").trim()) {
-      const kind = inboxKind === "thought" ? "thought" : "contact";
-      const inboxEvent = enqueueInboxEvent(inboxContent, Date.now(), kind);
-      appendSpecialEvent(`${content}\n${inboxEvent.content}`, {
-        heartbeatInboxContent: inboxEvent.content,
-        heartbeatInboxCreatedAt: inboxEvent.createdAt,
-        heartbeatInboxId: inboxEvent.id,
-        heartbeatInboxKind: kind,
-        heartbeatInboxPending: true
-      });
-      return reply.send({ success: true, inboxEventId: inboxEvent.id });
+    const { inboxContent, inboxKind } = req.body || {};
+    if (!String(inboxContent || "").trim()) {
+      return reply.code(400).send({ error: "inboxContent is required" });
     }
-    appendSpecialEvent(content);
-    reply.send({ success: true, inboxEventId: null });
+    const kind = inboxKind === "thought" ? "thought" : "contact";
+    const inboxEvent = enqueueInboxEvent(inboxContent, Date.now(), kind);
+    reply.send({ success: true, inboxEventId: inboxEvent.id });
   } catch (err) {
     console.error(err);
     reply.code(500).send({ error: err.message });
@@ -899,7 +778,7 @@ app.post("/api/polaris/heartbeat/ack", async (req, reply) => {
   const requestedIds = new Set(ids.map(id => String(id || "").trim()).filter(Boolean));
   const pending = listPendingInboxEvents().filter(event => requestedIds.has(event.id));
   const acknowledgedAt = Date.now();
-  promoteAcknowledgedInboxMessages(pending, acknowledgedAt);
+  appendAcknowledgedInboxMessages(pending, acknowledgedAt);
   const acknowledged = acknowledgeInboxEvents(ids, acknowledgedAt);
   reply.send({ acknowledged: acknowledged.map(event => event.id) });
 });
@@ -931,7 +810,12 @@ app.get("/api/polaris/heartbeat/policy", async (req, reply) => {
 app.put("/api/polaris/heartbeat/policy", async (req, reply) => {
   if (!requireHeartbeatInboxToken(req, reply)) return;
   try {
-    savePolicy(req.body?.policy || req.body || {});
+    const incoming = req.body?.policy || req.body || {};
+    const current = loadPolicy();
+    savePolicy({
+      ...incoming,
+      enabled: typeof incoming.enabled === "boolean" ? incoming.enabled : current.enabled
+    });
     reply.send(heartbeatPolicySnapshot());
   } catch (err) {
     reply.code(400).send({ error: err.message });
@@ -1033,18 +917,6 @@ function readEnvValueOrDefault(key, fallback) {
   return value === "" ? fallback : value;
 }
 
-function normalizePositiveInteger(value, key, fallback) {
-  const n = Number(value);
-  if (Number.isFinite(n) && n >= 1) return String(Math.floor(n));
-  return readEnvValueOrDefault(key, fallback);
-}
-
-function normalizeHour(value, key, fallback, min, max) {
-  const n = Number(value);
-  if (Number.isFinite(n) && n >= min && n <= max) return String(Math.floor(n));
-  return readEnvValueOrDefault(key, fallback);
-}
-
 function normalizeBooleanString(value, key, fallback) {
   const raw = String(value ?? "").trim().toLowerCase();
   if (["true", "1", "yes", "on"].includes(raw)) return "true";
@@ -1116,14 +988,6 @@ app.get("/admin", { preHandler: basicAuth }, async (req, reply) => {
   const currentModel = readEnvValue("MODEL_NAME");
   const currentIcon = readEnvValue("CUSTOM_ICON_URL");
   const gatewayKeyStatus = readEnvValue("GATEWAY_API_KEY") ? "已配置" : "未配置";
-  const wakeConfig = {
-    dayWakeAfter: readEnvValueOrDefault("DAY_WAKE_AFTER_MINUTES", "60"),
-    nightWakeAfter: readEnvValueOrDefault("NIGHT_WAKE_AFTER_MINUTES", "120"),
-    dayCheckInterval: readEnvValueOrDefault("DAY_CHECK_INTERVAL_MINUTES", "10"),
-    nightCheckInterval: readEnvValueOrDefault("NIGHT_CHECK_INTERVAL_MINUTES", "120"),
-    dayStartHour: readEnvValueOrDefault("WAKE_DAY_START_HOUR", "10"),
-    dayEndHour: readEnvValueOrDefault("WAKE_DAY_END_HOUR", "24")
-  };
   const weatherConfig = {
     enabled: readEnvValueOrDefault("WEATHER_ENABLED", "false"),
     locationName: readEnvValue("WEATHER_LOCATION_NAME"),
@@ -1146,7 +1010,7 @@ app.get("/admin", { preHandler: basicAuth }, async (req, reply) => {
 
   const authToken = Buffer.from(`${process.env.ADMIN_USER}:${process.env.ADMIN_PASSWORD}`).toString("base64");
   const runtimeConfigNotice = IS_RAILWAY_RUNTIME
-    ? `<div class="hint">Railway 检测到：此页面保存的是当前容器的 .env。Railway Variables 会优先提供运行时配置，且未挂载 Volume 的文件会在重新部署后丢失；请在 Railway Variables 修改唤醒数值并重新部署。</div>`
+    ? `<div class="hint">Railway 检测到：此页面保存的是当前容器的 .env。Railway Variables 会优先提供运行时配置，且未挂载 Volume 的文件会在重新部署后丢失；主动联系节奏请在无尽夏中修改。</div>`
     : "";
 
   const presets = loadPresets();
@@ -1644,34 +1508,6 @@ const html = `<!DOCTYPE html>
         <label>Bark Icon URL</label>
         <input name="custom_icon" id="f_icon" value="${escapeHtml(currentIcon)}" placeholder="可选">
 
-        <div class="section-title">Wake Settings</div>
-        <div class="grid-2">
-          <div>
-            <label>白天多久未回复后唤醒（分钟）</label>
-            <input type="number" min="1" name="day_wake_after" id="f_day_wake_after" value="${escapeHtml(wakeConfig.dayWakeAfter)}">
-          </div>
-          <div>
-            <label>夜间多久未回复后唤醒（分钟）</label>
-            <input type="number" min="1" name="night_wake_after" id="f_night_wake_after" value="${escapeHtml(wakeConfig.nightWakeAfter)}">
-          </div>
-          <div>
-            <label>白天检查间隔（分钟）</label>
-            <input type="number" min="1" name="day_check_interval" id="f_day_check_interval" value="${escapeHtml(wakeConfig.dayCheckInterval)}">
-          </div>
-          <div>
-            <label>夜间检查间隔（分钟）</label>
-            <input type="number" min="1" name="night_check_interval" id="f_night_check_interval" value="${escapeHtml(wakeConfig.nightCheckInterval)}">
-          </div>
-          <div>
-            <label>白天开始小时</label>
-            <input type="number" min="0" max="23" name="wake_day_start_hour" id="f_wake_day_start_hour" value="${escapeHtml(wakeConfig.dayStartHour)}">
-          </div>
-          <div>
-            <label>白天结束小时</label>
-            <input type="number" min="1" max="24" name="wake_day_end_hour" id="f_wake_day_end_hour" value="${escapeHtml(wakeConfig.dayEndHour)}">
-          </div>
-        </div>
-
         <div class="section-title">Weather</div>
         <label>天气注入</label>
         <select name="weather_enabled" id="f_weather_enabled">
@@ -1700,8 +1536,8 @@ const html = `<!DOCTYPE html>
       </form>
     </div>
 
-    <button onclick="restartServices()" class="restart">一键重启所有服务</button>
-    <div class="note">修改配置后先保存，再点重启按钮生效</div>
+    <button onclick="restartServices()" class="restart">重启 Gateway</button>
+    <div class="note">这里只重启 Gateway，不会启动或重启 wake-up</div>
   </div>
 
   <script>
@@ -1749,12 +1585,6 @@ const html = `<!DOCTYPE html>
         model_name: document.getElementById("f_model").value.trim(),
         bark_key: document.getElementById("f_bark").value.trim(),
         custom_icon: document.getElementById("f_icon").value.trim(),
-        day_wake_after: document.getElementById("f_day_wake_after").value.trim(),
-        night_wake_after: document.getElementById("f_night_wake_after").value.trim(),
-        day_check_interval: document.getElementById("f_day_check_interval").value.trim(),
-        night_check_interval: document.getElementById("f_night_check_interval").value.trim(),
-        wake_day_start_hour: document.getElementById("f_wake_day_start_hour").value.trim(),
-        wake_day_end_hour: document.getElementById("f_wake_day_end_hour").value.trim(),
         weather_enabled: document.getElementById("f_weather_enabled").value,
         weather_location_name: document.getElementById("f_weather_location_name").value.trim(),
         weather_lat: document.getElementById("f_weather_lat").value.trim(),
@@ -1827,7 +1657,7 @@ const html = `<!DOCTYPE html>
     }
 
     async function restartServices() {
-      if (!confirm("确定要重启 Gateway 和 wake_up 吗？")) return;
+      if (!confirm("确定只重启 Gateway 吗？wake-up 不会被改动。")) return;
       try {
         const resp = await fetch("/admin/restart", {
           method: "POST",
@@ -1865,12 +1695,6 @@ app.post("/admin/save", { preHandler: basicAuth }, async (req, reply) => {
       model_name,
       bark_key,
       custom_icon,
-      day_wake_after,
-      night_wake_after,
-      day_check_interval,
-      night_check_interval,
-      wake_day_start_hour,
-      wake_day_end_hour,
       weather_enabled,
       weather_location_name,
       weather_lat,
@@ -1886,7 +1710,7 @@ app.post("/admin/save", { preHandler: basicAuth }, async (req, reply) => {
     const finalGatewayKey = gateway_api_key || readEnvValue("GATEWAY_API_KEY");
     const finalBarkKey = bark_key || readEnvValue("BARK_KEY");
 
-    // 批注 2026-06-26：公开版把唤醒策略和天气信息开放到管理页；保存时做轻量校验，避免空值把运行中的唤醒节奏写坏。
+    // 主动联系节奏由无尽夏中的云端策略统一管理；旧昼夜变量不再从管理页读写。
     // 批注 2026-07-15：GATEWAY_API_KEY 是公开 /v1 的客户端鉴权 key，不能和上游 TARGET_API_KEY 混在一起展示或返回。
     writeEnvUpdates({
       TARGET_API_URL: target_url,
@@ -1895,12 +1719,6 @@ app.post("/admin/save", { preHandler: basicAuth }, async (req, reply) => {
       MODEL_NAME: model_name,
       BARK_KEY: finalBarkKey,
       CUSTOM_ICON_URL: custom_icon || "",
-      DAY_WAKE_AFTER_MINUTES: normalizePositiveInteger(day_wake_after, "DAY_WAKE_AFTER_MINUTES", "60"),
-      NIGHT_WAKE_AFTER_MINUTES: normalizePositiveInteger(night_wake_after, "NIGHT_WAKE_AFTER_MINUTES", "120"),
-      DAY_CHECK_INTERVAL_MINUTES: normalizePositiveInteger(day_check_interval, "DAY_CHECK_INTERVAL_MINUTES", "10"),
-      NIGHT_CHECK_INTERVAL_MINUTES: normalizePositiveInteger(night_check_interval, "NIGHT_CHECK_INTERVAL_MINUTES", "120"),
-      WAKE_DAY_START_HOUR: normalizeHour(wake_day_start_hour, "WAKE_DAY_START_HOUR", "10", 0, 23),
-      WAKE_DAY_END_HOUR: normalizeHour(wake_day_end_hour, "WAKE_DAY_END_HOUR", "24", 1, 24),
       WEATHER_ENABLED: normalizeBooleanString(weather_enabled, "WEATHER_ENABLED", "false"),
       WEATHER_LOCATION_NAME: weather_location_name || "",
       WEATHER_LAT: weather_lat || "",
@@ -1968,14 +1786,12 @@ app.post("/internal/heartbeat", async (req, reply) => {
 // 管理页一键重启
 // ========================
 app.post("/admin/restart", { preHandler: basicAuth }, async (req, reply) => {
-  const restartCommand = readRestartCommand();
-
   // 立即回复，避免重启时连接中断
-  reply.send({ success: true, output: `重启指令已发送：${restartCommand}` });
+  reply.send({ success: true, output: `重启指令已发送：${GATEWAY_RESTART_COMMAND}` });
   
-  // 稍后重启。默认只重启本项目的两个进程；可通过 RESTART_COMMAND 自定义。
+  // 只重启 Gateway。wake-up 可能被用户有意停止，管理页不能改变它的状态。
   const { exec } = require("child_process");
-  exec(restartCommand, (err, stdout, stderr) => {
+  exec(GATEWAY_RESTART_COMMAND, (err, stdout, stderr) => {
     if (err) {
       console.error("重启失败:", stderr);
     } else {
@@ -1985,40 +1801,34 @@ app.post("/admin/restart", { preHandler: basicAuth }, async (req, reply) => {
 });
 
 // ========================
-// 测试 Bark
-// ========================
-app.get("/test-bark", { preHandler: basicAuth }, async (req, reply) => {
-  const formattedTime = formatDateTimeInTimeZone(new Date(), TIME_ZONE);
-  appendSpecialEvent(`（${formattedTime} 刚刚给用户发了 Bark：这是一条测试推送。）`);
-  reply.send({ success: true });
-});
-
-// 批注 2026-08-10：公网测试入口归入 /admin 并沿用 Basic Auth；旧 /test-bark 只保留给本机兼容，
-// 避免平台反代把外部请求伪装成私网来源后向时间线写入假事件。
-app.get("/admin/test-bark", { preHandler: basicAuth }, async (req, reply) => {
-  const formattedTime = formatDateTimeInTimeZone(new Date(), TIME_ZONE);
-  appendSpecialEvent(`（${formattedTime} 刚刚给用户发了 Bark：这是一条测试推送。）`);
-  reply.send({ success: true });
-});
-
-// ========================
 // 启动服务
 // ========================
-app.listen({ port: PORT, host: "0.0.0.0" }, (err, address) => {
-  if (err) {
-    console.error(err);
-    process.exit(1);
-  }
-  // 只打印是否配置，不输出 URL、Key、用户名、聊天内容或 Volume 名称。
-  console.log(JSON.stringify({
-    event: "runtime_config_summary",
-    railway: IS_RAILWAY_RUNTIME,
-    persistent_data: Boolean(process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH),
-    target_url_configured: Boolean(TARGET_API_URL),
-    target_key_configured: Boolean(process.env.TARGET_API_KEY),
-    model_configured: Boolean(process.env.MODEL_NAME),
-    gateway_key_configured: Boolean(readEnvValue("GATEWAY_API_KEY")),
-    data_dir_ready: fs.existsSync(DATA_DIR)
-  }));
-  console.log(`✅ Gateway 运行在 ${address}`);
-});
+if (require.main === module) {
+  app.listen({ port: PORT, host: "0.0.0.0" }, (err, address) => {
+    if (err) {
+      console.error(err);
+      process.exit(1);
+    }
+    // 只打印是否配置，不输出 URL、Key、用户名、聊天内容或 Volume 名称。
+    console.log(JSON.stringify({
+      event: "runtime_config_summary",
+      railway: IS_RAILWAY_RUNTIME,
+      persistent_data: Boolean(process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH),
+      target_url_configured: Boolean(TARGET_API_URL),
+      target_key_configured: Boolean(process.env.TARGET_API_KEY),
+      model_configured: Boolean(process.env.MODEL_NAME),
+      gateway_key_configured: Boolean(readEnvValue("GATEWAY_API_KEY")),
+      data_dir_ready: fs.existsSync(DATA_DIR)
+    }));
+    console.log(`✅ Gateway 运行在 ${address}`);
+  });
+}
+
+module.exports = {
+  app,
+  appendAcknowledgedInboxMessages,
+  buildTimeline,
+  heartbeatInboxEventId,
+  loadTimeline,
+  saveTimeline
+};

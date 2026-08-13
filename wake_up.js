@@ -2,19 +2,15 @@ require("dotenv").config({ quiet: true });
 const fs = require("fs");
 const path = require("path");
 const { buildNtfyPayload } = require("./ntfy_priority");
-const { eligibility, savePolicyState } = require("./heartbeat_policy");
+const { eligibility, loadPolicy, savePolicyState } = require("./heartbeat_policy");
 const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_paths");
 const { parseChatCompletionResponse } = require("./upstream_response");
 const { messagesForWakeContext } = require("./special_events");
-const { parseWakeDecision, silentDecisionDelivery } = require("./wake_decision");
+const { parseWakeDecision, thoughtInboxContent } = require("./wake_decision");
 const { loadHeartbeatModelConfig } = require("./heartbeat_model_config");
 const { loadHeartbeatPromptConfig } = require("./heartbeat_prompt_config");
 const { listPendingInboxEvents } = require("./heartbeat_inbox");
-const {
-  buildPendingInboxContext,
-  findSimilarThought,
-  pendingInboxThoughts
-} = require("./heartbeat_thought_context");
+const { buildUnreadInboxContext } = require("./heartbeat_inbox_context");
 const {
   formatDateTimeInTimeZone,
   getDatePartsInTimeZone,
@@ -311,10 +307,6 @@ function getChinaTimeString() {
   return formatDateTimeInTimeZone(new Date(), TIME_ZONE);
 }
 
-function getLocalTimeString() {
-  return formatDateTimeInTimeZone(new Date(), TIME_ZONE);
-}
-
 function parseTimelineTimestamp(value) {
   const text = String(value || "");
   const match = text.match(/（?\s*(\d{4})([-/])(\d{1,2})\2(\d{1,2})(?:[ T]?)(\d{1,2})[:：](\d{2})/);
@@ -350,6 +342,30 @@ function stripPosition(messages) {
     heartbeatThoughtCreatedAt,
     ...rest
   }) => rest);
+}
+
+function userMessageSnapshot(messages) {
+  const latest = [...(Array.isArray(messages) ? messages : [])]
+    .reverse()
+    .find(message => message?.role === "user");
+  if (!latest) return "";
+  return JSON.stringify({
+    id: latest.id || null,
+    position: latest.position ?? null,
+    content: normalizeContentToText(latest.content)
+  });
+}
+
+async function enqueueWakeInboxEvent(content, kind) {
+  const response = await fetch(GATEWAY_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ inboxContent: content, inboxKind: kind })
+  });
+  if (!response.ok) throw new Error(`Gateway 返回 HTTP ${response.status}`);
+  const payload = await response.json();
+  if (!payload?.inboxEventId) throw new Error("Gateway 未返回收件箱事件 ID");
+  return payload.inboxEventId;
 }
 
 function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
@@ -438,20 +454,20 @@ async function runWakeUp() {
 
   const weatherContext = await fetchWeatherContext();
   const pendingInbox = listPendingInboxEvents();
-  const pendingThoughts = pendingInboxThoughts(pendingInbox);
-  const pendingInboxContext = buildPendingInboxContext(
+  const pendingInboxContext = buildUnreadInboxContext(
     pendingInbox,
     date => formatDateTimeInTimeZone(date, TIME_ZONE)
   );
   const wakePrompt = `${buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext)}\n\n${pendingInboxContext}`;
-  const cleanMessages = stripPosition(messagesForWakeContext(messages));
-
-  const historyText = cleanMessages
-    .filter(msg => msg.role !== "system")
+  const wakeContextMessages = messagesForWakeContext(messages);
+  const recentMessages = wakeContextMessages
+    .filter(msg => msg.role === "user" || msg.role === "assistant")
     .filter(msg => {
       const c = normalizeContentToText(msg.content);
       return !c.includes("<memories>") && !c.includes("记忆库使用策略");
     })
+    .slice(-50);
+  const historyText = stripPosition(recentMessages)
     .map(msg => {
       const userDisplay = process.env.USER_DISPLAY_NAME || "用户";
       const aiDisplay = process.env.AI_DISPLAY_NAME || "AI";
@@ -464,7 +480,7 @@ async function runWakeUp() {
     })
     .join("\n\n");
 
-  const baseSystemPrompt = cleanMessages.find(msg => msg.role === "system");
+  const baseSystemPrompt = wakeContextMessages.find(msg => msg.role === "system");
   const cleanSP = baseSystemPrompt 
     ? normalizeContentToText(baseSystemPrompt.content).split("## Memories")[0].trim()
     : "";
@@ -503,59 +519,40 @@ ${historyText}`
   }
 
   console.log("\nWake Result Summary:\n");
-  let duplicateThoughtSuppressed = false;
-  let rawAiText = await requestHeartbeatModel(heartbeatModel, wakeMessages);
-  let diaryResult = extractDiaryFromResponse(rawAiText);
-  let wakeDecision = parseWakeDecision(diaryResult.remainingText);
-  const duplicate = wakeDecision.type === "thought"
-    ? findSimilarThought(wakeDecision.content, pendingThoughts)
-    : null;
-  if (duplicate) {
-    console.log(JSON.stringify({ repeated_thought_score: Number(duplicate.score.toFixed(3)), retrying: true }));
-    rawAiText = await requestHeartbeatModel(heartbeatModel, [
-      ...wakeMessages,
-      { role: "assistant", content: rawAiText },
-      {
-        role: "user",
-        content: `刚才的心理活动与此前内容高度相似，不能保存。请承接此前思路重新判断：只写新的变化、新观察或新决定；如果确实没有新变化，就直接说明仍决定保持安静，不要复述或换词重演。`
-      }
-    ]);
-    diaryResult = extractDiaryFromResponse(rawAiText);
-    wakeDecision = parseWakeDecision(diaryResult.remainingText);
-    duplicateThoughtSuppressed = wakeDecision.type === "thought"
-      && Boolean(findSimilarThought(wakeDecision.content, pendingThoughts));
-    if (duplicateThoughtSuppressed) {
-      console.log(JSON.stringify({ repeated_thought_after_retry: true, inbox_suppressed: true }));
-    }
-  }
+  const rawAiText = await requestHeartbeatModel(heartbeatModel, wakeMessages);
+  const diaryResult = extractDiaryFromResponse(rawAiText);
+  const wakeDecision = parseWakeDecision(diaryResult.remainingText);
 
-  const diarySaved = appendDiaryEntry(diaryResult.diaryContent);
-  const aiText = diaryResult.remainingText;
-
-  if (!loadPolicy().enabled) {
-    console.log("主动联系已暂停，丢弃本次进行中的模型结果");
+  const latestMessages = loadTimelineMessages();
+  const latestLastUserTime = latestMessages ? getLastUserTime(latestMessages) : null;
+  const latestPolicyDecision = latestLastUserTime
+    ? eligibility({
+        now: Date.now(),
+        lastUserAt: latestLastUserTime.getTime(),
+        policy: loadPolicy(),
+        timeZone: TIME_ZONE
+      })
+    : { due: false };
+  if (!latestMessages
+    || userMessageSnapshot(latestMessages) !== userMessageSnapshot(messages)
+    || !latestPolicyDecision.due) {
+    console.log("主动联系条件已变化，丢弃本次进行中的模型结果");
     return;
   }
 
-  let eventContent;
-  let inboxContent = "";
-  let decisionResult = "no_action";
+  const diarySaved = appendDiaryEntry(diaryResult.diaryContent);
+  if (!diaryResult.remainingText) {
+    console.log(diarySaved ? "模型本次只写了日记" : "模型本次返回空内容");
+    savePolicyState({ lastDecisionAt: Date.now(), lastDecisionResult: "no_action" });
+    return;
+  }
 
-  if (duplicateThoughtSuppressed) {
-    console.log("\nAI 连续两次生成相似心理活动，本次不写入收件箱\n");
-    eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：心理活动重复，未进入收件箱）`;
-  } else if (!aiText) {
-    console.log("\nAI 未返回推送内容，本次不发送推送\n");
-    eventContent = diarySaved
-      ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：只写日记）`
-      : `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：模型空回复）`;
-  } else if (wakeDecision.type === "thought") {
+  let inboxContent;
+  let pushPayload = null;
+  if (wakeDecision.type === "thought") {
     console.log("\nAI 选择不发送推送，心理活动将进入收件箱\n");
-    const delivery = silentDecisionDelivery(wakeDecision.content, getLocalTimeString());
-    inboxContent = delivery.inboxContent;
-    eventContent = delivery.eventContent;
+    inboxContent = thoughtInboxContent(wakeDecision.content);
   } else {
-    // 没有 [NO_ACTION] 就视为想发推送
     console.log("\nAI 选择发送推送\n");
     let barkText = wakeDecision.content;
 
@@ -576,10 +573,12 @@ ${historyText}`
     // 按行处理
     const lines = barkText.split("\n").filter(line => line.trim() !== "");
 
-    let title, body;
+    let title;
+    let body;
     if (lines.length === 0) {
-      console.log("\n推送内容清洗后为空，本次不发送推送\n");
-      eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：推送内容为空）`;
+      console.log("\n推送内容清洗后为空，本次不写入收件箱\n");
+      savePolicyState({ lastDecisionAt: Date.now(), lastDecisionResult: "no_action" });
+      return;
     } else if (lines.length === 1) {
       title = "来自AI";
       body = lines[0].trim();
@@ -592,27 +591,23 @@ ${historyText}`
       body = lines.slice(1).map(l => l.trim()).join(" ");
     }
 
-    if (!eventContent) {
-      inboxContent = barkText;
-      // 保护：截断过长正文，兼容 Bark 和 ntfy 的移动端展示。
-      const safeBody = body.length > 500 ? body.substring(0, 497) + "..." : body;
-      // 若标题为空或以数字开头，加个前缀，可自行修改
-      let safeTitle = process.env.BARK_TITLE || title || "来自伴侣";
-      if (/^\d/.test(safeTitle)) safeTitle = "来自伴侣｜" + safeTitle;
+    inboxContent = barkText;
+    const safeBody = body.length > 500 ? body.substring(0, 497) + "..." : body;
+    let safeTitle = process.env.BARK_TITLE || title || "来自伴侣";
+    if (/^\d/.test(safeTitle)) safeTitle = "来自伴侣｜" + safeTitle;
+    pushPayload = { title: safeTitle, body: safeBody };
+  }
 
-      const pushResult = await sendPushNotification({ title: safeTitle, body: safeBody });
-      if (!pushResult.ok) {
-        inboxContent = "";
-        console.log(`\n${pushResult.providerLabel} 推送失败，本次不发送推送\n`);
-        eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${pushResult.providerLabel} 推送失败：${pushResult.reason}）`;
-      } else {
-        decisionResult = "sent";
-        eventContent = `（${getLocalTimeString()} 刚刚给用户发了${pushResult.providerLabel}推送：${safeTitle}｜${safeBody}）`;
-      }
-    }
+  try {
+    const inboxEventId = await enqueueWakeInboxEvent(inboxContent, wakeDecision.type);
+    console.log(JSON.stringify({ event: "heartbeat_inbox_persisted", inbox_event_id: inboxEventId, kind: wakeDecision.type }));
+  } catch (err) {
+    console.error("\n写入心跳收件箱失败，本次不发送手机推送：\n", err.message);
+    return;
   }
 
   const decidedAt = Date.now();
+  const decisionResult = wakeDecision.type === "contact" ? "sent" : "no_action";
   try {
     savePolicyState({
       lastDecisionAt: decidedAt,
@@ -623,22 +618,17 @@ ${historyText}`
     console.error("\n保存心跳策略状态失败:\n", err.message);
   }
 
-  try {
-    const eventResponse = await fetch(GATEWAY_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: eventContent,
-        inboxContent,
-        inboxKind: inboxContent ? wakeDecision.type : ""
-      })
-    });
-    if (!eventResponse.ok) {
-      throw new Error(`Gateway 返回 HTTP ${eventResponse.status}`);
+  if (pushPayload) {
+    try {
+      const pushResult = await sendPushNotification(pushPayload);
+      if (pushResult.ok) {
+        console.log(`\n${pushResult.providerLabel} 推送成功；正文已在此前写入收件箱\n`);
+      } else {
+        console.error(`\n${pushResult.providerLabel} 推送失败；正文仍保留在收件箱：${pushResult.reason}\n`);
+      }
+    } catch (err) {
+      console.error(`\n手机推送请求失败；正文仍保留在收件箱：${err.message}\n`);
     }
-    console.log("\n已通过 Gateway 记录唤醒事件\n");
-  } catch (err) {
-    console.error("\n记录唤醒事件失败（Gateway 是否运行？）:\n", err.message);
   }
 }
 
@@ -660,20 +650,24 @@ async function scheduleNextCheck() {
   setTimeout(scheduleNextCheck, getCheckIntervalMs());
 }
 
-// 潮水记得第一次没过礁石的时间。之后每一次涨落，都是同一片海在确认边界。
-// 启动第一次检查（延迟10秒）
-setTimeout(scheduleNextCheck, 10_000);
+if (require.main === module) {
+  // 潮水记得第一次没过礁石的时间。之后每一次涨落，都是同一片海在确认边界。
+  // 启动第一次检查（延迟10秒）
+  setTimeout(scheduleNextCheck, 10_000);
 
-console.log("\n==================================");
-console.log("Dylan Heartbeat Runtime 已启动（动态间隔）");
-console.log(JSON.stringify({
-  event: "wake_runtime_config_summary",
-  railway: Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_SERVICE_ID),
-  persistent_data: Boolean(process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH),
-  target_url_configured: Boolean(process.env.TARGET_API_URL),
-  target_key_configured: Boolean(process.env.TARGET_API_KEY),
-  model_configured: Boolean(process.env.MODEL_NAME),
-  push_provider_configured: Boolean(process.env.BARK_KEY || process.env.NTFY_TOPIC),
-  data_dir_ready: fs.existsSync(DATA_DIR)
-}));
-console.log("==================================\n");
+  console.log("\n==================================");
+  console.log("Dylan Heartbeat Runtime 已启动（动态间隔）");
+  console.log(JSON.stringify({
+    event: "wake_runtime_config_summary",
+    railway: Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_SERVICE_ID),
+    persistent_data: Boolean(process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH),
+    target_url_configured: Boolean(process.env.TARGET_API_URL),
+    target_key_configured: Boolean(process.env.TARGET_API_KEY),
+    model_configured: Boolean(process.env.MODEL_NAME),
+    push_provider_configured: Boolean(process.env.BARK_KEY || process.env.NTFY_TOPIC),
+    data_dir_ready: fs.existsSync(DATA_DIR)
+  }));
+  console.log("==================================\n");
+}
+
+module.exports = { userMessageSnapshot };

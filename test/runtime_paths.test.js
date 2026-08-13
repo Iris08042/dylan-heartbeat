@@ -11,11 +11,15 @@ const {
 } = require("../runtime_paths");
 
 test("DATA_DIR 优先于 Railway 自动挂载路径", () => {
+  const configuredDataDir = "/tmp/custom-data";
   assert.equal(
-    resolveDataDir({ DATA_DIR: "/tmp/custom-data", RAILWAY_VOLUME_MOUNT_PATH: "/tmp/railway" }),
-    "/tmp/custom-data"
+    resolveDataDir({ DATA_DIR: configuredDataDir, RAILWAY_VOLUME_MOUNT_PATH: "/tmp/railway" }),
+    configuredDataDir
   );
-  assert.equal(runtimeFile("state.json", { DATA_DIR: "/tmp/custom-data" }), "/tmp/custom-data/state.json");
+  assert.equal(
+    runtimeFile("state.json", { DATA_DIR: configuredDataDir }),
+    path.join(configuredDataDir, "state.json")
+  );
 });
 
 test("原子写入在覆盖前保留上一版 JSON", () => {
