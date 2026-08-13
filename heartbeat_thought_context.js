@@ -6,23 +6,11 @@ function thoughtBody(content) {
     .trim();
 }
 
-function isThoughtMessage(message) {
-  return message?.heartbeatInboxKind === "thought"
-    || message?.heartbeatThought === true
-    || (message?.heartbeatInboxPending === true
-      && String(message.content || "").includes("心理活动已存入收件箱"));
-}
-
-function pendingHeartbeatThoughts(messages) {
-  return (Array.isArray(messages) ? messages : [])
-    .filter(message => message?.role === "assistant" && isThoughtMessage(message))
-    .map(message => ({
-      content: thoughtBody(message.heartbeatInboxContent || message.content),
-      createdAt: Number(message.heartbeatInboxCreatedAt || message.heartbeatThoughtCreatedAt) || null,
-      acknowledgedAt: Number(message.heartbeatThoughtAcknowledgedAt) || null,
-      pending: message.heartbeatInboxPending === true
-    }))
-    .filter(thought => thought.content && thought.pending);
+function pendingInboxThoughts(events) {
+  return (Array.isArray(events) ? events : [])
+    .filter(event => event?.kind === "thought")
+    .map(event => ({ content: thoughtBody(event.content) }))
+    .filter(thought => thought.content);
 }
 
 function normalizeForComparison(content) {
@@ -60,24 +48,28 @@ function findSimilarThought(content, thoughts, threshold = 0.58) {
     .sort((left, right) => right.score - left.score)[0] || null;
 }
 
-function buildThoughtContinuityContext(thoughts, formatTime) {
-  if (!Array.isArray(thoughts) || thoughts.length === 0) {
-    return `## 心理活动连续性\n当前没有尚未被用户收取的心理活动。`;
+function buildPendingInboxContext(events, formatTime) {
+  const pending = (Array.isArray(events) ? events : [])
+    .filter(event => event?.content);
+  if (pending.length === 0) {
+    return `## 全部未读收件箱\n当前收件箱没有尚未被用户收取的内容。`;
   }
-  const lines = thoughts.map((thought, index) => {
-    const time = thought.createdAt && typeof formatTime === "function"
-      ? formatTime(new Date(thought.createdAt))
+  const lines = pending.map((event, index) => {
+    const time = event.createdAt && typeof formatTime === "function"
+      ? formatTime(new Date(event.createdAt))
       : "时间未知";
-    const status = thought.pending ? "尚未被用户看到" : "用户已经收取";
-    return `${index + 1}. [${time}｜${status}] ${thought.content}`;
+    const isThought = event.kind === "thought";
+    const kind = isThought ? "心理活动｜未发送手机推送" : "主动消息｜已发送手机推送";
+    const content = isThought ? thoughtBody(event.content) : String(event.content).trim();
+    return `${index + 1}. [${time}｜${kind}｜用户尚未收取] ${content}`;
   });
-  return `## 全部尚未收取的心理活动\n${lines.join("\n")}\n\n这次不是重新回复用户最后一条消息，而是承接上一次思路。只写新的变化、新观察或新决定；不得复述、改写或换词重演上面的内容。若确实没有新变化，请如实说明仍决定保持安静，不要编造新的情节。`;
+  return `## 全部未读收件箱\n${lines.join("\n")}\n\n以上内容都已经生成，但用户尚未打开聊天收取。它们不是用户发来的新消息。判断是否联系时必须考虑全部未读内容：不得重复发送或改写已有主动消息；不联系时只写相对于已有心理活动的新变化、新观察或新决定。若确实没有新变化，请如实说明仍决定保持安静，不要编造新的情节。`;
 }
 
 module.exports = {
-  buildThoughtContinuityContext,
+  buildPendingInboxContext,
   findSimilarThought,
-  pendingHeartbeatThoughts,
+  pendingInboxThoughts,
   similarity,
   thoughtBody
 };

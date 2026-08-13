@@ -1,61 +1,55 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  buildThoughtContinuityContext,
+  buildPendingInboxContext,
   findSimilarThought,
-  pendingHeartbeatThoughts,
+  pendingInboxThoughts,
   similarity
 } = require("../heartbeat_thought_context");
 
-test("labels pending thoughts and leaves acknowledged thoughts in normal chat context", () => {
-  const thoughts = pendingHeartbeatThoughts([
+test("lists every unread inbox event with its time and delivery type", () => {
+  const events = [
     {
-      role: "assistant",
-      heartbeatInboxPending: true,
-      heartbeatInboxKind: "thought",
-      heartbeatInboxCreatedAt: 1000,
-      heartbeatInboxContent: "（那时没有打扰你。心里想：先让她安心忙。）"
+      id: "thought-1",
+      kind: "thought",
+      createdAt: 1000,
+      content: "（那时没有打扰你。心里想：先让她安心忙。）"
     },
     {
-      role: "assistant",
-      heartbeatThought: true,
-      heartbeatThoughtCreatedAt: 2000,
-      heartbeatThoughtAcknowledgedAt: 3000,
-      content: "（那时没有打扰你。心里想：晚一点再看看。）"
+      id: "contact-1",
+      kind: "contact",
+      createdAt: 2000,
+      content: "记得起来喝口水。"
     }
-  ]);
-  assert.deepEqual(thoughts, [
-    { content: "先让她安心忙。", createdAt: 1000, acknowledgedAt: null, pending: true }
-  ]);
-  const context = buildThoughtContinuityContext(thoughts, date => `T${date.getTime()}`);
-  assert.match(context, /全部尚未收取的心理活动/);
-  assert.match(context, /T1000｜尚未被用户看到/);
-  assert.doesNotMatch(context, /T2000/);
-  assert.match(context, /不得复述、改写或换词重演/);
+  ];
+  const context = buildPendingInboxContext(events, date => `T${date.getTime()}`);
+  assert.match(context, /全部未读收件箱/);
+  assert.match(context, /T1000｜心理活动｜未发送手机推送｜用户尚未收取/);
+  assert.match(context, /T2000｜主动消息｜已发送手机推送｜用户尚未收取/);
+  assert.match(context, /记得起来喝口水/);
+  assert.match(context, /不得重复发送或改写已有主动消息/);
 });
 
-test("keeps every pending thought and leaves acknowledged thoughts in normal chat context", () => {
-  const messages = [];
+test("keeps every unread thought available for continuity and duplicate checks", () => {
+  const events = [];
   for (let index = 1; index <= 6; index += 1) {
-    messages.push({
-      role: "assistant",
-      heartbeatInboxPending: true,
-      heartbeatInboxKind: "thought",
-      heartbeatInboxCreatedAt: index,
-      heartbeatInboxContent: `未读心理活动 ${index}`
+    events.push({
+      id: `thought-${index}`,
+      kind: "thought",
+      createdAt: index,
+      content: `未读心理活动 ${index}`
     });
-    messages.push({
-      role: "assistant",
-      heartbeatThought: true,
-      heartbeatThoughtCreatedAt: 100 + index,
-      heartbeatThoughtAcknowledgedAt: 200 + index,
-      content: `已读心理活动 ${index}`
+    events.push({
+      id: `contact-${index}`,
+      kind: "contact",
+      createdAt: 100 + index,
+      content: `未读主动消息 ${index}`
     });
   }
 
-  const thoughts = pendingHeartbeatThoughts(messages);
+  const thoughts = pendingInboxThoughts(events);
   assert.deepEqual(
-    thoughts.filter(thought => thought.pending).map(thought => thought.content),
+    thoughts.map(thought => thought.content),
     [
       "未读心理活动 1",
       "未读心理活动 2",
@@ -65,8 +59,9 @@ test("keeps every pending thought and leaves acknowledged thoughts in normal cha
       "未读心理活动 6"
     ]
   );
-  assert.equal(thoughts.some(thought => !thought.pending), false);
   assert.ok(findSimilarThought("未读心理活动 1", thoughts));
+  const context = buildPendingInboxContext(events, date => `T${date.getTime()}`);
+  assert.equal((context.match(/未读主动消息/g) || []).length, 6);
 });
 
 test("detects exact and highly similar repeated thoughts", () => {

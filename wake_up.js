@@ -9,10 +9,11 @@ const { messagesForWakeContext } = require("./special_events");
 const { parseWakeDecision, silentDecisionDelivery } = require("./wake_decision");
 const { loadHeartbeatModelConfig } = require("./heartbeat_model_config");
 const { loadHeartbeatPromptConfig } = require("./heartbeat_prompt_config");
+const { listPendingInboxEvents } = require("./heartbeat_inbox");
 const {
-  buildThoughtContinuityContext,
+  buildPendingInboxContext,
   findSimilarThought,
-  pendingHeartbeatThoughts
+  pendingInboxThoughts
 } = require("./heartbeat_thought_context");
 const {
   formatDateTimeInTimeZone,
@@ -436,12 +437,13 @@ async function runWakeUp() {
   console.log(`\n策略允许唤醒（${policyDecision.profile.name}｜${policyDecision.source}）\n`);
 
   const weatherContext = await fetchWeatherContext();
-  const pendingThoughts = pendingHeartbeatThoughts(messages);
-  const thoughtContext = buildThoughtContinuityContext(
-    pendingThoughts,
+  const pendingInbox = listPendingInboxEvents();
+  const pendingThoughts = pendingInboxThoughts(pendingInbox);
+  const pendingInboxContext = buildPendingInboxContext(
+    pendingInbox,
     date => formatDateTimeInTimeZone(date, TIME_ZONE)
   );
-  const wakePrompt = `${buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext)}\n\n${thoughtContext}`;
+  const wakePrompt = `${buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext)}\n\n${pendingInboxContext}`;
   const cleanMessages = stripPosition(messagesForWakeContext(messages));
 
   const historyText = cleanMessages
