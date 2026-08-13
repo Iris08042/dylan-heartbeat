@@ -7,6 +7,7 @@ const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_path
 const { parseChatCompletionResponse } = require("./upstream_response");
 const { messagesForWakeContext } = require("./special_events");
 const { parseWakeDecision, silentDecisionDelivery } = require("./wake_decision");
+const { loadHeartbeatModelConfig } = require("./heartbeat_model_config");
 const {
   formatDateTimeInTimeZone,
   getDatePartsInTimeZone,
@@ -465,22 +466,23 @@ ${historyText}`
   console.log("\n===== WAKE MESSAGES SUMMARY =====\n");
   console.log(JSON.stringify(summarizeWakeMessages(wakeMessages)));
 
-  if (!process.env.TARGET_API_URL || !process.env.TARGET_API_KEY || !process.env.MODEL_NAME) {
+  const heartbeatModel = loadHeartbeatModelConfig();
+  if (!heartbeatModel.apiUrl || !heartbeatModel.apiKey || !heartbeatModel.model) {
     console.log("缺少 TARGET_API_URL / TARGET_API_KEY / MODEL_NAME，跳过本次唤醒");
     return;
   }
 
-  const response = await fetch(process.env.TARGET_API_URL, {
+  const response = await fetch(heartbeatModel.apiUrl, {
     method: "POST",
     // 批注 2026-08-10：上游只建连不结束时，旧循环永远不会安排下一次检查；
     // 五分钟默认总超时只作兜底，可由 WAKE_UPSTREAM_TIMEOUT_MS 调整。
     signal: AbortSignal.timeout(WAKE_UPSTREAM_TIMEOUT_MS),
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.TARGET_API_KEY}`
+      Authorization: `Bearer ${heartbeatModel.apiKey}`
     },
     body: JSON.stringify({
-      model: process.env.MODEL_NAME,
+      model: heartbeatModel.model,
       messages: wakeMessages,
       temperature: 0.8,
       top_p: 0.95,
@@ -507,6 +509,11 @@ ${historyText}`
   const diarySaved = appendDiaryEntry(diaryResult.diaryContent);
   const aiText = diaryResult.remainingText;
   const wakeDecision = parseWakeDecision(aiText);
+
+  if (!loadPolicy().enabled) {
+    console.log("主动联系已暂停，丢弃本次进行中的模型结果");
+    return;
+  }
 
   let eventContent;
   let inboxContent = "";

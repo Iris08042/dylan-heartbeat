@@ -53,3 +53,18 @@ test("heartbeat eligibility enforces idle, cooldown and reconsider windows", () 
   assert.equal(eligibility({ now, lastUserAt: now - 180 * 60000, policy, state: { lastDecisionAt: now - 5 * 60000, lastDecisionResult: "no_action" } }).reason, "reconsider");
   assert.equal(eligibility({ now, lastUserAt: now - 180 * 60000, policy, state: {} }).due, true);
 });
+
+test("heartbeat master switch stops wake eligibility", () => {
+  const { defaultPolicy, eligibility, normalizePolicy } = require("../heartbeat_policy");
+  const policy = defaultPolicy();
+  policy.enabled = false;
+  const normalized = normalizePolicy(policy);
+  const result = eligibility({
+    now: Date.parse("2026-08-11T12:00:00.000Z"),
+    lastUserAt: Date.parse("2026-08-11T08:00:00.000Z"),
+    policy: normalized,
+    state: {}
+  });
+  assert.equal(result.due, false);
+  assert.equal(result.reason, "disabled");
+});

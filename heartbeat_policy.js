@@ -25,6 +25,7 @@ function stateFile() {
 function defaultPolicy() {
   return {
     version: POLICY_VERSION,
+    enabled: true,
     defaultProfileId: "normal",
     profiles: DEFAULT_PROFILES.map(profile => ({ ...profile })),
     schedules: [],
@@ -165,7 +166,7 @@ function normalizePolicy(raw) {
       until: raw.override.until ? parseInstant(raw.override.until, "override.until") : null
     };
   }
-  return { version: POLICY_VERSION, defaultProfileId, profiles, schedules, override };
+  return { version: POLICY_VERSION, enabled: raw?.enabled !== false, defaultProfileId, profiles, schedules, override };
 }
 
 function loadPolicy() {
@@ -224,6 +225,7 @@ function savePolicyState(next) {
 
 function eligibility({ now = Date.now(), lastUserAt, policy = loadPolicy(), state = loadPolicyState(), timeZone = resolveTimeZone() } = {}) {
   const active = activeProfile(policy, new Date(now), timeZone);
+  if (!policy.enabled) return { due: false, reason: "disabled", waitMinutes: null, ...active };
   if (!active.profile || active.profile.silent) return { due: false, reason: "silent", waitMinutes: null, ...active };
   const userAt = Number(lastUserAt);
   if (!Number.isFinite(userAt)) return { due: false, reason: "missing_user_time", waitMinutes: null, ...active };

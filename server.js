@@ -24,12 +24,18 @@ const {
   savePolicy
 } = require("./heartbeat_policy");
 const {
+  publicHeartbeatModelConfig,
+  saveHeartbeatModelConfig
+} = require("./heartbeat_model_config");
+const {
   formatDateTimeInTimeZone,
   resolveTimeZone,
   zonedWallTimeToDate
 } = require("./time_utils");
+const { createCloudBackupStore } = require("./cloud_backup");
 
 const DEFAULT_BODY_LIMIT_MB = 50;
+const DEFAULT_BACKUP_BODY_LIMIT_MB = 512;
 
 function readBodyLimitBytes() {
   const configured = Number(process.env.REQUEST_BODY_LIMIT_MB);
@@ -43,6 +49,8 @@ const app = Fastify({
 });
 
 app.register(require("@fastify/formbody"));
+app.addContentTypeParser("application/zip", { parseAs: "buffer" }, (req, body, done) => done(null, body));
+app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (req, body, done) => done(null, body));
 
 const PORT = Number(process.env.PORT) || 3000;
 const TARGET_API_URL = process.env.TARGET_API_URL;
@@ -55,6 +63,7 @@ const IS_RAILWAY_RUNTIME = Boolean(
 // 批注 2026-08-10：默认路径仍是项目目录，保护本机/VPS 旧部署；Railway 挂载 Volume 后
 // DATA_DIR（或平台提供的 RAILWAY_VOLUME_MOUNT_PATH）统一承载时间线、时间戳、预设和日记。
 const DATA_DIR = ensureDataDir();
+const cloudBackupStore = createCloudBackupStore({ dataDir: DATA_DIR });
 const TIMELINE_FILE = runtimeFile("enhanced_messages.json");
 const TIMESTAMP_DB_FILE = runtimeFile("message_timestamps.json");
 // 批注 2026-07-17：管理页保存 .env 后要让 PM2 刷新进程环境；保留原进程名，
@@ -471,6 +480,25 @@ function requireHeartbeatInboxToken(req, reply) {
   return true;
 }
 
+function readBackupBodyLimitBytes() {
+  const configured = Number(process.env.POLARIS_BACKUP_BODY_LIMIT_MB);
+  const mb = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_BACKUP_BODY_LIMIT_MB;
+  return Math.floor(mb * 1024 * 1024);
+}
+
+function requireCloudBackupToken(req, reply) {
+  const configured = String(process.env.POLARIS_BACKUP_TOKEN || "").trim();
+  if (!configured) {
+    reply.code(503).send({ error: "POLARIS_BACKUP_TOKEN is not configured" });
+    return false;
+  }
+  if (readBearerToken(req) !== configured) {
+    reply.code(401).send({ error: "Cloud backup token is invalid or missing" });
+    return false;
+  }
+  return true;
+}
+
 let wakeUpLastHeartbeat = null;
 
 // ========================
@@ -484,6 +512,8 @@ const PREFERRED_ENV_ORDER = [
   "TARGET_API_KEY",
   "GATEWAY_API_KEY",
   "HEARTBEAT_INBOX_TOKEN",
+  "POLARIS_BACKUP_TOKEN",
+  "POLARIS_BACKUP_BODY_LIMIT_MB",
   "MODEL_NAME",
   "BARK_KEY",
   "BARK_TITLE",
@@ -882,6 +912,55 @@ app.put("/api/polaris/heartbeat/policy", async (req, reply) => {
 app.get("/api/polaris/heartbeat/status", async (req, reply) => {
   if (!requireHeartbeatInboxToken(req, reply)) return;
   reply.send(heartbeatPolicySnapshot());
+});
+
+app.get("/api/polaris/backup/status", async (req, reply) => {
+  if (!requireCloudBackupToken(req, reply)) return;
+  const backups = cloudBackupStore.listBackups();
+  reply.send({ backups });
+});
+
+app.post("/api/polaris/backup/backups", { bodyLimit: readBackupBodyLimitBytes() }, async (req, reply) => {
+  if (!requireCloudBackupToken(req, reply)) return;
+  try {
+    const backup = cloudBackupStore.saveBackup(
+      req.body,
+      String(req.headers["x-polaris-backup-created-at"] || "")
+    );
+    reply.send({ backup });
+  } catch (error) {
+    reply.code(400).send({ error: error.message });
+  }
+});
+
+app.get("/api/polaris/backup/backups/:id", async (req, reply) => {
+  if (!requireCloudBackupToken(req, reply)) return;
+  const backup = cloudBackupStore.readBackup(req.params.id);
+  if (!backup) return reply.code(404).send({ error: "Cloud backup was not found" });
+  reply
+    .header("content-type", "application/zip")
+    .header("content-disposition", `attachment; filename=polaris-cloud-backup-${req.params.id}.zip`)
+    .header("x-polaris-backup-sha256", backup.metadata.sha256)
+    .send(backup.buffer);
+});
+
+app.get("/api/polaris/heartbeat/model", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    reply.send(publicHeartbeatModelConfig());
+  } catch (err) {
+    reply.code(500).send({ error: err.message });
+  }
+});
+
+app.put("/api/polaris/heartbeat/model", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    saveHeartbeatModelConfig(req.body || {});
+    reply.send(publicHeartbeatModelConfig());
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
 });
 
 // ========================
