@@ -24,8 +24,14 @@ const {
   savePolicy
 } = require("./heartbeat_policy");
 const {
+  activateHeartbeatModelProfile,
+  chatCompletionsUrl,
+  deleteHeartbeatModelProfile,
+  modelsUrl,
   publicHeartbeatModelConfig,
-  saveHeartbeatModelConfig
+  resolveHeartbeatModelCandidate,
+  saveHeartbeatModelConfig,
+  saveHeartbeatModelProfile
 } = require("./heartbeat_model_config");
 const {
   loadHeartbeatPromptConfig,
@@ -871,6 +877,91 @@ app.put("/api/polaris/heartbeat/model", async (req, reply) => {
   try {
     saveHeartbeatModelConfig(req.body || {});
     reply.send(publicHeartbeatModelConfig());
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
+});
+
+app.put("/api/polaris/heartbeat/model/profile", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    saveHeartbeatModelProfile(req.body || {});
+    reply.send(publicHeartbeatModelConfig());
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
+});
+
+app.put("/api/polaris/heartbeat/model/active", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    activateHeartbeatModelProfile(req.body?.id);
+    reply.send(publicHeartbeatModelConfig());
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
+});
+
+app.delete("/api/polaris/heartbeat/model/profile/:id", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    deleteHeartbeatModelProfile(req.params.id);
+    reply.send(publicHeartbeatModelConfig());
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
+});
+
+function upstreamError(body, status) {
+  const message = body?.error?.message || body?.error || body?.message;
+  return typeof message === "string" && message.trim()
+    ? message.trim().slice(0, 500)
+    : `上游接口返回 ${status}`;
+}
+
+async function requestHeartbeatProvider(url, candidate, body) {
+  const response = await fetch(url, {
+    method: body ? "POST" : "GET",
+    signal: AbortSignal.timeout(20_000),
+    headers: {
+      Authorization: `Bearer ${candidate.apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const result = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(upstreamError(result, response.status));
+  return result;
+}
+
+app.post("/api/polaris/heartbeat/model/models", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    const candidate = resolveHeartbeatModelCandidate(req.body || {});
+    const result = await requestHeartbeatProvider(modelsUrl(candidate.baseUrl), candidate);
+    const models = Array.isArray(result?.data)
+      ? result.data.map(item => String(item?.id || "").trim()).filter(Boolean).sort()
+      : [];
+    reply.send({ models });
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
+});
+
+app.post("/api/polaris/heartbeat/model/test", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    const candidate = resolveHeartbeatModelCandidate(req.body || {});
+    if (!candidate.model) throw new Error("请先选择模型");
+    const result = await requestHeartbeatProvider(chatCompletionsUrl(candidate.baseUrl), candidate, {
+      model: candidate.model,
+      messages: [{ role: "user", content: "Reply with OK." }],
+      temperature: 0.8,
+      top_p: 0.95,
+      stream: false
+    });
+    const content = result?.choices?.[0]?.message?.content;
+    reply.send({ ok: true, model: String(result?.model || candidate.model), reply: typeof content === "string" ? content.slice(0, 100) : "" });
   } catch (err) {
     reply.code(400).send({ error: err.message });
   }
