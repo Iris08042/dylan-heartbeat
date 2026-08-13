@@ -12,7 +12,7 @@ const { loadHeartbeatPromptConfig } = require("./heartbeat_prompt_config");
 const {
   buildThoughtContinuityContext,
   findSimilarThought,
-  recentHeartbeatThoughts
+  pendingHeartbeatThoughts
 } = require("./heartbeat_thought_context");
 const {
   formatDateTimeInTimeZone,
@@ -436,9 +436,9 @@ async function runWakeUp() {
   console.log(`\n策略允许唤醒（${policyDecision.profile.name}｜${policyDecision.source}）\n`);
 
   const weatherContext = await fetchWeatherContext();
-  const recentThoughts = recentHeartbeatThoughts(messages);
+  const pendingThoughts = pendingHeartbeatThoughts(messages);
   const thoughtContext = buildThoughtContinuityContext(
-    recentThoughts,
+    pendingThoughts,
     date => formatDateTimeInTimeZone(date, TIME_ZONE)
   );
   const wakePrompt = `${buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext)}\n\n${thoughtContext}`;
@@ -506,7 +506,7 @@ ${historyText}`
   let diaryResult = extractDiaryFromResponse(rawAiText);
   let wakeDecision = parseWakeDecision(diaryResult.remainingText);
   const duplicate = wakeDecision.type === "thought"
-    ? findSimilarThought(wakeDecision.content, recentThoughts)
+    ? findSimilarThought(wakeDecision.content, pendingThoughts)
     : null;
   if (duplicate) {
     console.log(JSON.stringify({ repeated_thought_score: Number(duplicate.score.toFixed(3)), retrying: true }));
@@ -521,7 +521,7 @@ ${historyText}`
     diaryResult = extractDiaryFromResponse(rawAiText);
     wakeDecision = parseWakeDecision(diaryResult.remainingText);
     duplicateThoughtSuppressed = wakeDecision.type === "thought"
-      && Boolean(findSimilarThought(wakeDecision.content, recentThoughts));
+      && Boolean(findSimilarThought(wakeDecision.content, pendingThoughts));
     if (duplicateThoughtSuppressed) {
       console.log(JSON.stringify({ repeated_thought_after_retry: true, inbox_suppressed: true }));
     }

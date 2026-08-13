@@ -3,12 +3,12 @@ const assert = require("node:assert/strict");
 const {
   buildThoughtContinuityContext,
   findSimilarThought,
-  recentHeartbeatThoughts,
+  pendingHeartbeatThoughts,
   similarity
 } = require("../heartbeat_thought_context");
 
-test("labels pending and acknowledged thoughts with their actual state", () => {
-  const thoughts = recentHeartbeatThoughts([
+test("labels pending thoughts and leaves acknowledged thoughts in normal chat context", () => {
+  const thoughts = pendingHeartbeatThoughts([
     {
       role: "assistant",
       heartbeatInboxPending: true,
@@ -25,13 +25,48 @@ test("labels pending and acknowledged thoughts with their actual state", () => {
     }
   ]);
   assert.deepEqual(thoughts, [
-    { content: "先让她安心忙。", createdAt: 1000, acknowledgedAt: null, pending: true },
-    { content: "晚一点再看看。", createdAt: 2000, acknowledgedAt: 3000, pending: false }
+    { content: "先让她安心忙。", createdAt: 1000, acknowledgedAt: null, pending: true }
   ]);
   const context = buildThoughtContinuityContext(thoughts, date => `T${date.getTime()}`);
+  assert.match(context, /全部尚未收取的心理活动/);
   assert.match(context, /T1000｜尚未被用户看到/);
-  assert.match(context, /T2000｜用户已经收取/);
+  assert.doesNotMatch(context, /T2000/);
   assert.match(context, /不得复述、改写或换词重演/);
+});
+
+test("keeps every pending thought and leaves acknowledged thoughts in normal chat context", () => {
+  const messages = [];
+  for (let index = 1; index <= 6; index += 1) {
+    messages.push({
+      role: "assistant",
+      heartbeatInboxPending: true,
+      heartbeatInboxKind: "thought",
+      heartbeatInboxCreatedAt: index,
+      heartbeatInboxContent: `未读心理活动 ${index}`
+    });
+    messages.push({
+      role: "assistant",
+      heartbeatThought: true,
+      heartbeatThoughtCreatedAt: 100 + index,
+      heartbeatThoughtAcknowledgedAt: 200 + index,
+      content: `已读心理活动 ${index}`
+    });
+  }
+
+  const thoughts = pendingHeartbeatThoughts(messages);
+  assert.deepEqual(
+    thoughts.filter(thought => thought.pending).map(thought => thought.content),
+    [
+      "未读心理活动 1",
+      "未读心理活动 2",
+      "未读心理活动 3",
+      "未读心理活动 4",
+      "未读心理活动 5",
+      "未读心理活动 6"
+    ]
+  );
+  assert.equal(thoughts.some(thought => !thought.pending), false);
+  assert.ok(findSimilarThought("未读心理活动 1", thoughts));
 });
 
 test("detects exact and highly similar repeated thoughts", () => {

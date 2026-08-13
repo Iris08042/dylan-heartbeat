@@ -34,3 +34,36 @@ test("removes wake audit rows and pending thoughts from ordinary wake history", 
   assert.equal(isNoPushWakeEventContent(messages[1].content), true);
   assert.equal(isNoPushWakeEventContent("普通聊天里提到本次未发送推送"), false);
 });
+
+test("keeps every pending contact and acknowledged thoughts in normal chat context", () => {
+  const acknowledgedThought = {
+    role: "assistant",
+    content: "（那时没有打扰你。心里想：等她忙完再说。）",
+    heartbeatThought: true,
+    heartbeatThoughtCreatedAt: 1000,
+    heartbeatThoughtAcknowledgedAt: 2000
+  };
+  const messages = [
+    { role: "user", content: "我先去忙一会儿。" },
+    {
+      role: "assistant",
+      heartbeatInboxPending: true,
+      heartbeatInboxKind: "contact",
+      heartbeatInboxContent: "记得起来喝口水。"
+    },
+    acknowledgedThought,
+    {
+      role: "assistant",
+      heartbeatInboxPending: true,
+      heartbeatInboxKind: "contact",
+      heartbeatInboxContent: "窗外开始下雨了。"
+    }
+  ];
+
+  assert.deepEqual(messagesForWakeContext(messages), [
+    messages[0],
+    { role: "assistant", content: "[此前已生成、用户尚未收取的主动消息]\n记得起来喝口水。" },
+    acknowledgedThought,
+    { role: "assistant", content: "[此前已生成、用户尚未收取的主动消息]\n窗外开始下雨了。" }
+  ]);
+});
