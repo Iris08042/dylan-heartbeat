@@ -319,6 +319,8 @@ function getLastUserTime(messages) {
   const reversed = [...messages].reverse();
   for (const msg of reversed) {
     if (msg.role === "user") {
+      const storedTimestamp = Number(msg.timestamp);
+      if (Number.isFinite(storedTimestamp) && storedTimestamp > 0) return new Date(storedTimestamp);
       const content = normalizeContentToText(msg.content);
       // 批注 2026-07-15：兼容 Kelivo 时间前缀 "YYYY-MM-DDHH:mm"；
       // 旧的 "YYYY-MM-DD HH:mm" 仍然可用，避免无空格时间导致 wake-up 误判没有用户时间。
@@ -670,4 +672,4 @@ if (require.main === module) {
   console.log("==================================\n");
 }
 
-module.exports = { userMessageSnapshot };
+module.exports = { getLastUserTime, userMessageSnapshot };

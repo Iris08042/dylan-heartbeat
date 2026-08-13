@@ -1,6 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { userMessageSnapshot } = require("../wake_up");
+const { getLastUserTime, userMessageSnapshot } = require("../wake_up");
+
+test("prefers the synced numeric user timestamp", () => {
+  const messages = [{ role: "user", content: "没有时间前缀", timestamp: 1700000000000 }];
+  assert.equal(getLastUserTime(messages)?.getTime(), 1700000000000);
+});
 
 test("detects a user message that arrives while the heartbeat model is running", () => {
   const before = [

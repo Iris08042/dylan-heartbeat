@@ -98,6 +98,34 @@ test("acknowledgement moves inbox events into the 50-message read timeline exact
       payload: { policy: legacyPolicy }
     });
     assert.equal(legacySaveResponse.json().policy.enabled, false);
+
+    const emptyContextResponse = await server.app.inject({
+      method: "PUT",
+      url: "/api/polaris/heartbeat/context",
+      headers: { authorization: "Bearer test-token" },
+      payload: { systemPrompt: "persona", messages: [] }
+    });
+    assert.equal(emptyContextResponse.statusCode, 400);
+
+    const contextMessages = Array.from({ length: 55 }, (_, index) => ({
+      id: `context-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: `context ${index}`,
+      timestamp: 1000 + index
+    }));
+    const contextResponse = await server.app.inject({
+      method: "PUT",
+      url: "/api/polaris/heartbeat/context",
+      headers: { authorization: "Bearer test-token" },
+      payload: { systemPrompt: "current persona", messages: contextMessages }
+    });
+    assert.equal(contextResponse.statusCode, 200);
+    assert.equal(contextResponse.json().messageCount, 50);
+    const syncedTimeline = server.loadTimeline();
+    assert.equal(syncedTimeline.length, 51);
+    assert.equal(syncedTimeline[0].content, "current persona");
+    assert.equal(syncedTimeline[1].id, "context-5");
+    assert.equal(syncedTimeline.at(-1).id, "context-54");
   } finally {
     await server.app.close();
     if (previousDataDir === undefined) delete process.env.DATA_DIR;

@@ -263,6 +263,25 @@ function saveTimeline(messages) {
   writeJsonAtomicSync(TIMELINE_FILE, final);
 }
 
+function saveHeartbeatContext(raw) {
+  const systemPrompt = String(raw?.systemPrompt || "").trim();
+  const messages = (Array.isArray(raw?.messages) ? raw.messages : [])
+    .filter(message => message?.role === "user" || message?.role === "assistant")
+    .map(message => ({
+      id: String(message.id || "").trim(),
+      role: message.role,
+      content: normalizeContentToText(message.content).trim(),
+      timestamp: Number(message.timestamp)
+    }))
+    .filter(message => message.id && message.content && Number.isFinite(message.timestamp))
+    .slice(-50);
+  if (!messages.some(message => message.role === "user")) {
+    throw new Error("at least one user message is required");
+  }
+  saveTimeline([{ role: "system", content: systemPrompt }, ...messages]);
+  return { messageCount: messages.length, latestMessageAt: messages.at(-1)?.timestamp || null };
+}
+
 // ========================
 // 提取时间戳（支持多种格式）
 // ========================
@@ -787,6 +806,17 @@ app.post("/api/polaris/heartbeat/ack", async (req, reply) => {
   appendAcknowledgedInboxMessages(pending, acknowledgedAt);
   const acknowledged = acknowledgeInboxEvents(ids, acknowledgedAt);
   reply.send({ acknowledged: acknowledged.map(event => event.id) });
+});
+
+app.put("/api/polaris/heartbeat/context", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    const saved = saveHeartbeatContext(req.body || {});
+    console.log(JSON.stringify({ event: "heartbeat_context_synced", ...saved }));
+    reply.send({ success: true, ...saved });
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
 });
 
 function heartbeatPolicySnapshot() {
@@ -1921,5 +1951,6 @@ module.exports = {
   buildTimeline,
   heartbeatInboxEventId,
   loadTimeline,
+  saveHeartbeatContext,
   saveTimeline
 };
