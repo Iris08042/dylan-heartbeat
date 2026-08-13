@@ -41,10 +41,14 @@ test("heartbeat model config starts from shared env and then becomes independent
 
     saveHeartbeatModelConfig({
       apiUrl: "https://new.example/v1/chat/completions",
-      apiKey: "",
       model: "new-model"
     }, env);
     assert.equal(loadHeartbeatModelConfig(env).apiKey, "heartbeat-secret");
+    assert.throws(() => saveHeartbeatModelConfig({
+      apiUrl: "https://new.example/v1/chat/completions",
+      apiKey: "",
+      model: "new-model"
+    }, env), /不能为空/);
   } finally {
     if (previousDataDir === undefined) delete process.env.DATA_DIR;
     else process.env.DATA_DIR = previousDataDir;

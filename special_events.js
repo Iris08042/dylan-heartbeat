@@ -17,7 +17,10 @@ function messagesForWakeContext(messages) {
 
     if (message.heartbeatInboxPending === true) {
       const content = String(message.heartbeatInboxContent || "").trim();
-      return content ? [{ role: "assistant", content }] : [];
+      const isThought = message.heartbeatInboxKind === "thought"
+        || String(message.content || "").includes("心理活动已存入收件箱");
+      if (isThought) return [];
+      return content ? [{ role: "assistant", content: `[此前已生成、用户尚未收取的主动消息]\n${content}` }] : [];
     }
 
     return isSpecialEventContent(message.content) ? [] : [message];

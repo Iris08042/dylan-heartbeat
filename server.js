@@ -28,6 +28,10 @@ const {
   saveHeartbeatModelConfig
 } = require("./heartbeat_model_config");
 const {
+  loadHeartbeatPromptConfig,
+  saveHeartbeatPromptConfig
+} = require("./heartbeat_prompt_config");
+const {
   formatDateTimeInTimeZone,
   resolveTimeZone,
   zonedWallTimeToDate
@@ -437,28 +441,49 @@ function stripPosition(messages) {
   return messages.map(({
     position,
     heartbeatInboxContent,
+    heartbeatInboxCreatedAt,
     heartbeatInboxId,
+    heartbeatInboxKind,
     heartbeatInboxPending,
+    heartbeatThought,
+    heartbeatThoughtAcknowledgedAt,
+    heartbeatThoughtCreatedAt,
     ...rest
   }) => rest);
 }
 
-function promoteAcknowledgedInboxMessages(events) {
+function promoteAcknowledgedInboxMessages(events, acknowledgedAt) {
   if (!Array.isArray(events) || events.length === 0) return;
-  const contentById = new Map(events.map(event => [event.id, event.content]));
+  const eventById = new Map(events.map(event => [event.id, event]));
   const timeline = loadTimeline();
   let changed = false;
   const promoted = timeline.map(message => {
-    const content = contentById.get(message.heartbeatInboxId);
-    if (!content) return message;
+    const event = eventById.get(message.heartbeatInboxId);
+    if (!event?.content) return message;
     changed = true;
+    const isThought = message.heartbeatInboxKind === "thought"
+      || event.kind === "thought"
+      || String(message.content || "").includes("心理活动已存入收件箱");
     const {
       heartbeatInboxContent,
+      heartbeatInboxCreatedAt,
       heartbeatInboxId,
+      heartbeatInboxKind,
       heartbeatInboxPending,
       ...rest
     } = message;
-    return { ...rest, role: "assistant", content };
+    return {
+      ...rest,
+      role: "assistant",
+      content: event.content,
+      ...(isThought
+        ? {
+            heartbeatThought: true,
+            heartbeatThoughtCreatedAt: heartbeatInboxCreatedAt || event.createdAt,
+            heartbeatThoughtAcknowledgedAt: acknowledgedAt
+          }
+        : {})
+    };
   });
   if (changed) saveTimeline(promoted);
 }
@@ -840,13 +865,16 @@ app.post("/v1/chat/completions", async (req, reply) => {
 // ========================
 app.post("/internal/wake-event", async (req, reply) => {
   try {
-    const { content, inboxContent } = req.body;
+    const { content, inboxContent, inboxKind } = req.body;
     if (!content) return reply.code(400).send({ error: "content is required" });
     if (String(inboxContent || "").trim()) {
-      const inboxEvent = enqueueInboxEvent(inboxContent);
+      const kind = inboxKind === "thought" ? "thought" : "contact";
+      const inboxEvent = enqueueInboxEvent(inboxContent, Date.now(), kind);
       appendSpecialEvent(`${content}\n${inboxEvent.content}`, {
         heartbeatInboxContent: inboxEvent.content,
+        heartbeatInboxCreatedAt: inboxEvent.createdAt,
         heartbeatInboxId: inboxEvent.id,
+        heartbeatInboxKind: kind,
         heartbeatInboxPending: true
       });
       return reply.send({ success: true, inboxEventId: inboxEvent.id });
@@ -870,8 +898,9 @@ app.post("/api/polaris/heartbeat/ack", async (req, reply) => {
   if (!Array.isArray(ids)) return reply.code(400).send({ error: "ids must be an array" });
   const requestedIds = new Set(ids.map(id => String(id || "").trim()).filter(Boolean));
   const pending = listPendingInboxEvents().filter(event => requestedIds.has(event.id));
-  promoteAcknowledgedInboxMessages(pending);
-  const acknowledged = acknowledgeInboxEvents(ids);
+  const acknowledgedAt = Date.now();
+  promoteAcknowledgedInboxMessages(pending, acknowledgedAt);
+  const acknowledged = acknowledgeInboxEvents(ids, acknowledgedAt);
   reply.send({ acknowledged: acknowledged.map(event => event.id) });
 });
 
@@ -958,6 +987,24 @@ app.put("/api/polaris/heartbeat/model", async (req, reply) => {
   try {
     saveHeartbeatModelConfig(req.body || {});
     reply.send(publicHeartbeatModelConfig());
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
+});
+
+app.get("/api/polaris/heartbeat/prompt", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    reply.send(loadHeartbeatPromptConfig());
+  } catch (err) {
+    reply.code(500).send({ error: err.message });
+  }
+});
+
+app.put("/api/polaris/heartbeat/prompt", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    reply.send(saveHeartbeatPromptConfig(req.body || {}));
   } catch (err) {
     reply.code(400).send({ error: err.message });
   }

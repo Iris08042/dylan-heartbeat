@@ -8,6 +8,12 @@ const { parseChatCompletionResponse } = require("./upstream_response");
 const { messagesForWakeContext } = require("./special_events");
 const { parseWakeDecision, silentDecisionDelivery } = require("./wake_decision");
 const { loadHeartbeatModelConfig } = require("./heartbeat_model_config");
+const { loadHeartbeatPromptConfig } = require("./heartbeat_prompt_config");
+const {
+  buildThoughtContinuityContext,
+  findSimilarThought,
+  recentHeartbeatThoughts
+} = require("./heartbeat_thought_context");
 const {
   formatDateTimeInTimeZone,
   getDatePartsInTimeZone,
@@ -334,35 +340,19 @@ function stripPosition(messages) {
   return messages.map(({
     position,
     heartbeatInboxContent,
+    heartbeatInboxCreatedAt,
     heartbeatInboxId,
+    heartbeatInboxKind,
     heartbeatInboxPending,
+    heartbeatThought,
+    heartbeatThoughtAcknowledgedAt,
+    heartbeatThoughtCreatedAt,
     ...rest
   }) => rest);
 }
 
 function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
-  let prompt;
-
-  // 优先读取独立的提示词文件（推荐方式）
-  const promptFile = path.join(__dirname, "wake_prompt.txt");
-  if (fs.existsSync(promptFile)) {
-    prompt = fs.readFileSync(promptFile, "utf-8");
-  } else if (process.env.WAKE_PROMPT_TEMPLATE) {
-    // 如果文件不存在，尝试从环境变量读取（兼容旧配置）
-    prompt = process.env.WAKE_PROMPT_TEMPLATE.replace(/\\n/g, '\n');
-  } else {
-    // 默认理智版本（开源通用），可自行修改提示词
-    prompt = `
-## 最高优先级规则
-1. 这是一次后台自动唤醒，不是用户发起的对话。你没有收到任何新消息。
-2. 你的唯一任务是决定是否主动联系用户。不能生成对话回复。
-
-## 唤醒信息
-- 当前时间：${currentTime}
-- 距离用户最后一条消息：${diffMinutes} 分钟
-${weatherContext ? `\n${weatherContext}\n` : ""}
-`;
-  }
+  const prompt = loadHeartbeatPromptConfig().prompt;
 
   const resolvedPrompt = prompt
     .replace(/\$\{currentTime\}/g, currentTime)
@@ -376,8 +366,41 @@ ${weatherContext ? `\n${weatherContext}\n` : ""}
 - 每次都要留下真实内容，并严格选择以下一种格式。
 - 如果想联系用户，直接写你想说的话。系统会同时发送手机推送，并在用户打开聊天后写入同一条对话。可以是一句话，也可以第一行作为标题、第二行作为正文。
 - 如果此刻不想打扰用户，第一行输出：[NO_ACTION]，后面写一至三句自然、具体的第一人称心理活动。心理活动不会触发手机推送，但会在用户下次打开聊天时进入同一条对话。不能只写标签或简短理由。
+- 不联系时必须承接系统列出的此前心理活动，只写新的变化、新观察或新决定；不得复述、改写或换词重演已有内容。
 - 如果你想写日记，可以额外输出 [DIARY]...[/DIARY]。只有想写时才写，不必每次都写。
 `;
+}
+
+async function requestHeartbeatModel(heartbeatModel, messages) {
+  const response = await fetch(heartbeatModel.apiUrl, {
+    method: "POST",
+    signal: AbortSignal.timeout(WAKE_UPSTREAM_TIMEOUT_MS),
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${heartbeatModel.apiKey}`
+    },
+    body: JSON.stringify({
+      model: heartbeatModel.model,
+      messages,
+      temperature: 0.8,
+      top_p: 0.95,
+      stream: false
+    })
+  });
+
+  const responseText = await response.text();
+  let data;
+  try {
+    data = parseChatCompletionResponse(responseText, response.headers.get("content-type") || "");
+  } catch (error) {
+    throw new Error(`模型响应无法解析（HTTP ${response.status}）：${error.message || responseText.slice(0, 300)}`);
+  }
+  if (!response.ok) {
+    throw new Error(`模型请求失败（HTTP ${response.status}）：${responseText.slice(0, 300)}`);
+  }
+  const text = normalizeContentToText(data.choices?.[0]?.message?.content).trim();
+  console.log(JSON.stringify({ choices: Array.isArray(data.choices) ? data.choices.length : 0, ai_text_chars: text.length }));
+  return text;
 }
 
 async function runWakeUp() {
@@ -413,7 +436,12 @@ async function runWakeUp() {
   console.log(`\n策略允许唤醒（${policyDecision.profile.name}｜${policyDecision.source}）\n`);
 
   const weatherContext = await fetchWeatherContext();
-  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext);
+  const recentThoughts = recentHeartbeatThoughts(messages);
+  const thoughtContext = buildThoughtContinuityContext(
+    recentThoughts,
+    date => formatDateTimeInTimeZone(date, TIME_ZONE)
+  );
+  const wakePrompt = `${buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext)}\n\n${thoughtContext}`;
   const cleanMessages = stripPosition(messagesForWakeContext(messages));
 
   const historyText = cleanMessages
@@ -472,43 +500,35 @@ ${historyText}`
     return;
   }
 
-  const response = await fetch(heartbeatModel.apiUrl, {
-    method: "POST",
-    // 批注 2026-08-10：上游只建连不结束时，旧循环永远不会安排下一次检查；
-    // 五分钟默认总超时只作兜底，可由 WAKE_UPSTREAM_TIMEOUT_MS 调整。
-    signal: AbortSignal.timeout(WAKE_UPSTREAM_TIMEOUT_MS),
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${heartbeatModel.apiKey}`
-    },
-    body: JSON.stringify({
-      model: heartbeatModel.model,
-      messages: wakeMessages,
-      temperature: 0.8,
-      top_p: 0.95,
-      stream: false
-    })
-  });
-
-  const responseText = await response.text();
-  let data;
-  try {
-    data = parseChatCompletionResponse(responseText, response.headers.get("content-type") || "");
-  } catch (error) {
-    throw new Error(`模型响应无法解析（HTTP ${response.status}）：${error.message || responseText.slice(0, 300)}`);
-  }
-  if (!response.ok) {
-    throw new Error(`模型请求失败（HTTP ${response.status}）：${responseText.slice(0, 300)}`);
-  }
-
-  const rawAiText = normalizeContentToText(data.choices?.[0]?.message?.content).trim();
   console.log("\nWake Result Summary:\n");
-  console.log(JSON.stringify({ choices: Array.isArray(data.choices) ? data.choices.length : 0, ai_text_chars: rawAiText.length }));
+  let duplicateThoughtSuppressed = false;
+  let rawAiText = await requestHeartbeatModel(heartbeatModel, wakeMessages);
+  let diaryResult = extractDiaryFromResponse(rawAiText);
+  let wakeDecision = parseWakeDecision(diaryResult.remainingText);
+  const duplicate = wakeDecision.type === "thought"
+    ? findSimilarThought(wakeDecision.content, recentThoughts)
+    : null;
+  if (duplicate) {
+    console.log(JSON.stringify({ repeated_thought_score: Number(duplicate.score.toFixed(3)), retrying: true }));
+    rawAiText = await requestHeartbeatModel(heartbeatModel, [
+      ...wakeMessages,
+      { role: "assistant", content: rawAiText },
+      {
+        role: "user",
+        content: `刚才的心理活动与此前内容高度相似，不能保存。请承接此前思路重新判断：只写新的变化、新观察或新决定；如果确实没有新变化，就直接说明仍决定保持安静，不要复述或换词重演。`
+      }
+    ]);
+    diaryResult = extractDiaryFromResponse(rawAiText);
+    wakeDecision = parseWakeDecision(diaryResult.remainingText);
+    duplicateThoughtSuppressed = wakeDecision.type === "thought"
+      && Boolean(findSimilarThought(wakeDecision.content, recentThoughts));
+    if (duplicateThoughtSuppressed) {
+      console.log(JSON.stringify({ repeated_thought_after_retry: true, inbox_suppressed: true }));
+    }
+  }
 
-  const diaryResult = extractDiaryFromResponse(rawAiText);
   const diarySaved = appendDiaryEntry(diaryResult.diaryContent);
   const aiText = diaryResult.remainingText;
-  const wakeDecision = parseWakeDecision(aiText);
 
   if (!loadPolicy().enabled) {
     console.log("主动联系已暂停，丢弃本次进行中的模型结果");
@@ -519,7 +539,10 @@ ${historyText}`
   let inboxContent = "";
   let decisionResult = "no_action";
 
-  if (!aiText) {
+  if (duplicateThoughtSuppressed) {
+    console.log("\nAI 连续两次生成相似心理活动，本次不写入收件箱\n");
+    eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：心理活动重复，未进入收件箱）`;
+  } else if (!aiText) {
     console.log("\nAI 未返回推送内容，本次不发送推送\n");
     eventContent = diarySaved
       ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：只写日记）`
@@ -602,7 +625,11 @@ ${historyText}`
     const eventResponse = await fetch(GATEWAY_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: eventContent, inboxContent })
+      body: JSON.stringify({
+        content: eventContent,
+        inboxContent,
+        inboxKind: inboxContent ? wakeDecision.type : ""
+      })
     });
     if (!eventResponse.ok) {
       throw new Error(`Gateway 返回 HTTP ${eventResponse.status}`);

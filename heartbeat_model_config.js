@@ -49,9 +49,10 @@ function saveHeartbeatModelConfig(raw, env = process.env) {
   const current = loadHeartbeatModelConfig(env);
   const apiUrl = normalizeApiUrl(raw?.apiUrl);
   const model = String(raw?.model || "").trim();
-  const apiKey = String(raw?.apiKey || "").trim() || current.apiKey;
+  const replacingApiKey = Object.hasOwn(raw || {}, "apiKey");
+  const apiKey = replacingApiKey ? String(raw.apiKey || "").trim() : current.apiKey;
   if (!model) throw new Error("模型名称不能为空");
-  if (!apiKey) throw new Error("首次保存时必须填写 API Key");
+  if (!apiKey) throw new Error(replacingApiKey ? "新 API Key 不能为空" : "首次保存时必须填写 API Key");
 
   const saved = { apiUrl, apiKey, model };
   const filePath = configFile();

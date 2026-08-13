@@ -28,7 +28,7 @@ function listPendingInboxEvents() {
     .sort((left, right) => Number(left.createdAt) - Number(right.createdAt));
 }
 
-function enqueueInboxEvent(content, createdAt = Date.now()) {
+function enqueueInboxEvent(content, createdAt = Date.now(), kind = "") {
   const cleanContent = String(content || "").trim();
   if (!cleanContent) throw new Error("inbox content is required");
 
@@ -37,6 +37,7 @@ function enqueueInboxEvent(content, createdAt = Date.now()) {
     content: cleanContent,
     createdAt: Number(createdAt)
   };
+  if (["contact", "thought"].includes(kind)) event.kind = kind;
   const pending = listPendingInboxEvents();
   pending.push(event);
   writeJsonAtomicSync(inboxFile(), pending);
