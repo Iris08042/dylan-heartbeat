@@ -252,6 +252,9 @@ DATA_DIR=
 REQUEST_BODY_LIMIT_MB=50
 POLARIS_BACKUP_TOKEN=请改成另一条随机长密码
 POLARIS_BACKUP_BODY_LIMIT_MB=512
+OMBRE_DASHBOARD_URL=http://127.0.0.1:18001
+OMBRE_DASHBOARD_PASSWORD=你的Ombre控制台密码
+OMBRE_DASHBOARD_TIMEOUT_MS=8000
 MULTIMODAL_MODE=passthrough
 WEATHER_ENABLED=false
 WEATHER_LOCATION_NAME=Beijing
@@ -270,12 +273,15 @@ ADMIN_PASSWORD=你的强密码
 - `REQUEST_BODY_LIMIT_MB`：Gateway 可接收的请求体大小，默认 `50`。Kelivo 发送 base64 图片时请求会明显变大，如果仍然报 `413 Payload Too Large`，可以继续调高。
 - `POLARIS_BACKUP_TOKEN`：无尽夏完整云备份专用密钥，不要和模型、心跳或管理页密钥共用。
 - `POLARIS_BACKUP_BODY_LIMIT_MB`：完整备份上传上限，默认 `512` MB；超过上限会明确失败，不会保存半份备份。
+- `OMBRE_DASHBOARD_URL`：Ombre Brain 控制台的服务器内网地址，当前部署可使用 `http://127.0.0.1:18001`。
+- `OMBRE_DASHBOARD_PASSWORD`：Ombre Brain 控制台密码，仅由网关在服务器端使用，不会发给浏览器。
+- `OMBRE_DASHBOARD_TIMEOUT_MS`：网关访问 Ombre Brain 控制台的超时毫秒数，默认 `8000`。
 - `MULTIMODAL_MODE=passthrough`：默认视觉透传模式。Gateway 会保留 Kelivo 原始的多模态 `content` 数组，直接交给支持 OpenAI 兼容图片消息的上游模型。
 - `MULTIMODAL_MODE=text`：文本占位降级模式。图片会被转换成 `[图片]` 继续发给上游，适合不支持视觉的模型或中转站。
 
 ### 无尽夏完整云备份
 
-配置 `POLARIS_BACKUP_TOKEN` 后，无尽夏可以把完整 ZIP 备份保存到 `DATA_DIR/polaris-cloud-backup/backups`。开启自动备份后，每天第一次打开并完成本地数据加载时上传一次；当天不因聊天或设置变化重复上传。自动和手动备份共用同一套滚动版本，始终只保留最近三次成功且校验完整的 ZIP；“恢复最新”直接读取其中最新的一份。
+配置 `POLARIS_BACKUP_TOKEN` 后，无尽夏可以把完整 ZIP 备份保存到 `DATA_DIR/polaris-cloud-backup/backups`。开启自动备份后，每天以用户发出的第一条消息作为运行机会上传一次；当天不因后续聊天或设置变化重复上传。自动和手动备份共用同一套滚动版本，始终只保留最近三次成功且校验完整的 ZIP；“恢复最新”直接读取其中最新的一份。
 
 备份包含应用的七个持久化数据域、聊天正文、附件原件与预览，以及所有 `polaris-*` 浏览器模块设置。客户端和服务端会核对文件大小与 SHA-256；校验不一致时不会报告成功。新设备第一次连接到已有云备份时不会自动覆盖，必须先明确恢复云端或手动以当前设备创建完整备份。
 
