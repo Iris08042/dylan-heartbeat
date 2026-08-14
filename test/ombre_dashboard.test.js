@@ -39,6 +39,16 @@ test("normalizes current and legacy bucket fields", () => {
   });
 });
 
+test("marks Ombre's timezone-naive timestamps as UTC", () => {
+  const bucket = normalizeOmbreBucket({
+    created_at: "2026-08-14T17:06:02",
+    last_active_at: "2026-08-14T17:06:57"
+  });
+
+  assert.equal(bucket.createdAt, "2026-08-14T17:06:02Z");
+  assert.equal(bucket.lastActiveAt, "2026-08-14T17:06:57Z");
+});
+
 test("logs in once and retries once after an expired session", async () => {
   const calls = [];
   let loginCount = 0;

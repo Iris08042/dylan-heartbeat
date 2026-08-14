@@ -29,6 +29,14 @@ function asBoolean(value) {
   return Boolean(value);
 }
 
+function normalizeOmbreTimestamp(value) {
+  if (!value) return null;
+  const timestamp = String(value);
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(timestamp)
+    ? `${timestamp}Z`
+    : timestamp;
+}
+
 function normalizeOmbreBucket(bucket = {}) {
   const metadata = bucket.meta || bucket.metadata || {};
   const content = String(bucket.content || bucket.text || bucket.body || "");
@@ -59,9 +67,9 @@ function normalizeOmbreBucket(bucket = {}) {
     whyRemembered: String(bucket.why_remembered || metadata.why_remembered || ""),
     sourceTool: String(bucket.source_tool || metadata.source_tool || ""),
     activationCount: asNumber(bucket.activation_count, metadata.activation_count) ?? 0,
-    createdAt: bucket.created_at || bucket.created || metadata.created || null,
-    lastActiveAt: bucket.last_active_at || bucket.last_active || metadata.last_active
-      || bucket.created_at || bucket.created || metadata.created || null
+    createdAt: normalizeOmbreTimestamp(bucket.created_at || bucket.created || metadata.created),
+    lastActiveAt: normalizeOmbreTimestamp(bucket.last_active_at || bucket.last_active || metadata.last_active
+      || bucket.created_at || bucket.created || metadata.created)
   };
 }
 
