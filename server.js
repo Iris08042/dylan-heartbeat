@@ -43,6 +43,11 @@ const {
   zonedWallTimeToDate
 } = require("./time_utils");
 const { createCloudBackupStore } = require("./cloud_backup");
+const {
+  createOmbreDashboardClient,
+  mapOmbreDashboardError,
+  normalizeOmbreBucket
+} = require("./ombre_dashboard");
 
 const DEFAULT_BODY_LIMIT_MB = 50;
 const DEFAULT_BACKUP_BODY_LIMIT_MB = 512;
@@ -74,6 +79,7 @@ const IS_RAILWAY_RUNTIME = Boolean(
 // DATA_DIR（或平台提供的 RAILWAY_VOLUME_MOUNT_PATH）统一承载时间线、时间戳、预设和日记。
 const DATA_DIR = ensureDataDir();
 const cloudBackupStore = createCloudBackupStore({ dataDir: DATA_DIR });
+const ombreDashboard = createOmbreDashboardClient();
 const TIMELINE_FILE = runtimeFile("enhanced_messages.json");
 const TIMESTAMP_DB_FILE = runtimeFile("message_timestamps.json");
 // 批注 2026-07-17：管理页保存 .env 后要让 PM2 刷新进程环境；保留原进程名，
@@ -478,6 +484,19 @@ function requireCloudBackupToken(req, reply) {
   return true;
 }
 
+function requireOmbreDashboardToken(req, reply) {
+  const configured = String(process.env.POLARIS_BACKUP_TOKEN || "").trim();
+  if (!configured) {
+    reply.code(503).send({ error: "POLARIS_BACKUP_TOKEN is not configured" });
+    return false;
+  }
+  if (readBearerToken(req) !== configured) {
+    reply.code(401).send({ error: "Ombre Dashboard access token is invalid or missing" });
+    return false;
+  }
+  return true;
+}
+
 let wakeUpLastHeartbeat = null;
 
 // ========================
@@ -493,6 +512,9 @@ const PREFERRED_ENV_ORDER = [
   "HEARTBEAT_INBOX_TOKEN",
   "POLARIS_BACKUP_TOKEN",
   "POLARIS_BACKUP_BODY_LIMIT_MB",
+  "OMBRE_DASHBOARD_URL",
+  "OMBRE_DASHBOARD_PASSWORD",
+  "OMBRE_DASHBOARD_TIMEOUT_MS",
   "MODEL_NAME",
   "BARK_KEY",
   "BARK_TITLE",
@@ -891,6 +913,105 @@ app.get("/api/polaris/backup/backups/:id", async (req, reply) => {
     .header("content-disposition", `attachment; filename=polaris-cloud-backup-${req.params.id}.zip`)
     .header("x-polaris-backup-sha256", backup.metadata.sha256)
     .send(backup.buffer);
+});
+
+function sendOmbreDashboardError(reply, error) {
+  const mapped = mapOmbreDashboardError(error);
+  console.warn(JSON.stringify({ event: "ombre_dashboard_error", code: error?.code || "unknown" }));
+  reply.code(mapped.status).send({ error: mapped.error, message: mapped.message });
+}
+
+app.get("/api/polaris/ombre/status", async (req, reply) => {
+  if (!requireOmbreDashboardToken(req, reply)) return;
+  if (!ombreDashboard.configured()) {
+    return reply.code(503).send({ available: false, error: "ombre_not_configured" });
+  }
+  try {
+    const data = await ombreDashboard.request("/api/status");
+    const buckets = data.buckets || {};
+    reply.send({
+      available: true,
+      version: data.version || null,
+      total: Number(buckets.total ?? data.total ?? 0),
+      permanent: Number(buckets.permanent ?? 0),
+      dynamic: Number(buckets.dynamic ?? 0),
+      archived: Number(buckets.archive ?? buckets.archived ?? 0)
+    });
+  } catch (error) {
+    sendOmbreDashboardError(reply, error);
+  }
+});
+
+app.get("/api/polaris/ombre/buckets", async (req, reply) => {
+  if (!requireOmbreDashboardToken(req, reply)) return;
+  try {
+    const state = String(req.query?.state || "").toLowerCase();
+    const upstreamParams = new URLSearchParams({ sort: "created_desc" });
+    if (state === "archived") upstreamParams.set("include_archive", "true");
+    const data = await ombreDashboard.request(`/api/buckets?${upstreamParams.toString()}`);
+    let items = (Array.isArray(data) ? data : data.buckets || data.items || []).map(normalizeOmbreBucket);
+    const type = String(req.query?.type || "").toLowerCase();
+    if (type) items = items.filter(item => item.type.toLowerCase() === type);
+    if (state === "pinned") items = items.filter(item => item.pinned);
+    if (state === "archived") items = items.filter(item => item.archived);
+    reply.send({ items, total: items.length });
+  } catch (error) {
+    sendOmbreDashboardError(reply, error);
+  }
+});
+
+app.get("/api/polaris/ombre/search", async (req, reply) => {
+  if (!requireOmbreDashboardToken(req, reply)) return;
+  const query = String(req.query?.q || "").trim().slice(0, 160);
+  if (!query) return reply.send({ items: [], total: 0, query: "" });
+  try {
+    const data = await ombreDashboard.request(`/api/search?q=${encodeURIComponent(query)}`);
+    const raw = Array.isArray(data) ? data : data.results || data.items || data.buckets || [];
+    const items = raw.map(normalizeOmbreBucket);
+    reply.send({ items, total: items.length, query });
+  } catch (error) {
+    sendOmbreDashboardError(reply, error);
+  }
+});
+
+app.get("/api/polaris/ombre/buckets/:id", async (req, reply) => {
+  if (!requireOmbreDashboardToken(req, reply)) return;
+  try {
+    const data = await ombreDashboard.request(`/api/bucket/${encodeURIComponent(req.params.id)}`);
+    reply.send(normalizeOmbreBucket(data.bucket || data));
+  } catch (error) {
+    sendOmbreDashboardError(reply, error);
+  }
+});
+
+app.post("/api/polaris/ombre/buckets/:id/:action", async (req, reply) => {
+  if (!requireOmbreDashboardToken(req, reply)) return;
+  const action = String(req.params.action || "");
+  if (!["pin", "resolve", "archive", "forget", "anchor"].includes(action)) {
+    return reply.code(404).send({ error: "Unsupported Ombre action" });
+  }
+  try {
+    const data = await ombreDashboard.request(
+      `/api/bucket/${encodeURIComponent(req.params.id)}/${action}`,
+      { method: "POST", body: req.body || {} }
+    );
+    reply.send(data);
+  } catch (error) {
+    sendOmbreDashboardError(reply, error);
+  }
+});
+
+app.get("/api/polaris/ombre/breath-debug", async (req, reply) => {
+  if (!requireOmbreDashboardToken(req, reply)) return;
+  const params = new URLSearchParams();
+  params.set("q", String(req.query?.q || "").trim().slice(0, 160));
+  if (req.query?.valence !== undefined && req.query.valence !== "") params.set("valence", String(req.query.valence));
+  if (req.query?.arousal !== undefined && req.query.arousal !== "") params.set("arousal", String(req.query.arousal));
+  try {
+    reply.send(await ombreDashboard.request(`/api/breath-debug?${params.toString()}`));
+  } catch (error) {
+    sendOmbreDashboardError(reply, error);
+  }
 });
 
 app.get("/api/polaris/heartbeat/model", async (req, reply) => {
