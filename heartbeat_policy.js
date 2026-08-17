@@ -242,12 +242,18 @@ function eligibility({ now = Date.now(), lastUserAt, policy = loadPolicy(), stat
   if (!Number.isFinite(userAt)) return { due: false, reason: "missing_user_time", waitMinutes: null, ...active };
 
   const thresholds = [{ reason: "user_idle", at: userAt + active.profile.userIdleMinutes * 60000 }];
-  if (state.lastSentAt && state.lastSentAt > userAt) {
-    thresholds.push({ reason: "send_cooldown", at: state.lastSentAt + active.profile.sendCooldownMinutes * 60000 });
-  }
-  const latestActivity = Math.max(userAt, state.lastSentAt || 0);
-  if (state.lastDecisionResult === "no_action" && state.lastDecisionAt > latestActivity) {
-    thresholds.push({ reason: "reconsider", at: state.lastDecisionAt + active.profile.reconsiderMinutes * 60000 });
+  if (active.allowContact === false) {
+    if (state.lastDecisionAt > userAt) {
+      thresholds.push({ reason: "background_cooldown", at: state.lastDecisionAt + active.profile.sendCooldownMinutes * 60000 });
+    }
+  } else {
+    if (state.lastSentAt && state.lastSentAt > userAt) {
+      thresholds.push({ reason: "send_cooldown", at: state.lastSentAt + active.profile.sendCooldownMinutes * 60000 });
+    }
+    const latestActivity = Math.max(userAt, state.lastSentAt || 0);
+    if (state.lastDecisionResult === "no_action" && state.lastDecisionAt > latestActivity) {
+      thresholds.push({ reason: "reconsider", at: state.lastDecisionAt + active.profile.reconsiderMinutes * 60000 });
+    }
   }
   const pending = thresholds.filter(threshold => threshold.at > now).sort((left, right) => right.at - left.at)[0];
   if (pending) return { due: false, reason: pending.reason, waitMinutes: Math.ceil((pending.at - now) / 60000), ...active };

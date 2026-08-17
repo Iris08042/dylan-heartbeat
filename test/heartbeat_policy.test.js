@@ -62,6 +62,38 @@ test("heartbeat eligibility enforces idle, cooldown and reconsider windows", () 
   assert.equal(eligibility({ now, lastUserAt: now - 180 * 60000, policy, state: {} }).due, true);
 });
 
+test("do-not-disturb uses the send cooldown as its repeat wake interval", () => {
+  const { defaultPolicy, eligibility } = require("../heartbeat_policy");
+  const policy = defaultPolicy();
+  const now = Date.parse("2026-08-11T12:00:00.000Z");
+  const lastUserAt = now - 180 * 60000;
+
+  policy.defaultAllowContact = false;
+  assert.equal(eligibility({ now, lastUserAt, policy, state: {} }).due, true);
+
+  const recentDecision = { lastDecisionAt: now - 5 * 60000, lastDecisionResult: "no_action" };
+  const backgroundWait = eligibility({ now, lastUserAt, policy, state: recentDecision });
+  assert.equal(backgroundWait.reason, "background_cooldown");
+  assert.equal(backgroundWait.waitMinutes, 115);
+  assert.equal(eligibility({
+    now,
+    lastUserAt,
+    policy,
+    state: { lastDecisionAt: now - 5 * 60000, lastSentAt: now - 5 * 60000, lastDecisionResult: "sent" }
+  }).reason, "background_cooldown");
+  assert.equal(eligibility({
+    now,
+    lastUserAt,
+    policy,
+    state: { lastDecisionAt: now - 121 * 60000, lastDecisionResult: "no_action" }
+  }).due, true);
+
+  policy.defaultAllowContact = true;
+  const contactWait = eligibility({ now, lastUserAt, policy, state: recentDecision });
+  assert.equal(contactWait.reason, "reconsider");
+  assert.equal(contactWait.waitMinutes, 15);
+});
+
 test("heartbeat master switch stops wake eligibility", () => {
   const { defaultPolicy, eligibility, normalizePolicy } = require("../heartbeat_policy");
   const policy = defaultPolicy();
