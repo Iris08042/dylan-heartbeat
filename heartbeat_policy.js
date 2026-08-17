@@ -3,7 +3,7 @@ const crypto = require("crypto");
 const { runtimeFile, writeJsonAtomicSync } = require("./runtime_paths");
 const { getDatePartsInTimeZone, resolveTimeZone } = require("./time_utils");
 
-const POLICY_VERSION = 1;
+const POLICY_VERSION = 2;
 const MAX_MINUTES = 7 * 24 * 60;
 
 const DEFAULT_PROFILES = [
@@ -27,6 +27,7 @@ function defaultPolicy() {
     version: POLICY_VERSION,
     enabled: true,
     defaultProfileId: "normal",
+    defaultAllowContact: true,
     profiles: DEFAULT_PROFILES.map(profile => ({ ...profile })),
     schedules: [],
     override: null
@@ -110,7 +111,8 @@ function normalizeSchedule(raw, profileIds) {
     name: cleanName(raw?.name),
     enabled: raw?.enabled !== false,
     type,
-    profileId
+    profileId,
+    allowContact: raw?.allowContact !== false
   };
   if (type === "once") {
     const startAt = parseInstant(raw?.startAt, "startAt");
@@ -163,10 +165,19 @@ function normalizePolicy(raw) {
     if (!profileIds.has(profileId)) throw new Error("override profileId does not exist");
     override = {
       profileId,
+      allowContact: raw.override.allowContact !== false,
       until: raw.override.until ? parseInstant(raw.override.until, "override.until") : null
     };
   }
-  return { version: POLICY_VERSION, enabled: raw?.enabled !== false, defaultProfileId, profiles, schedules, override };
+  return {
+    version: POLICY_VERSION,
+    enabled: raw?.enabled !== false,
+    defaultProfileId,
+    defaultAllowContact: raw?.defaultAllowContact !== false,
+    profiles,
+    schedules,
+    override
+  };
 }
 
 function loadPolicy() {
@@ -199,13 +210,13 @@ function recurringMatches(schedule, now, timeZone) {
 function activeProfile(policy = loadPolicy(), now = new Date(), timeZone = resolveTimeZone()) {
   const profiles = new Map(policy.profiles.map(profile => [profile.id, profile]));
   if (policy.override && (!policy.override.until || new Date(policy.override.until) > now)) {
-    return { profile: profiles.get(policy.override.profileId), source: "override", schedule: null };
+    return { profile: profiles.get(policy.override.profileId), allowContact: policy.override.allowContact !== false, source: "override", schedule: null };
   }
   const oneTime = policy.schedules.find(schedule => schedule.enabled && schedule.type === "once" && new Date(schedule.startAt) <= now && now < new Date(schedule.endAt));
-  if (oneTime) return { profile: profiles.get(oneTime.profileId), source: "once", schedule: oneTime };
+  if (oneTime) return { profile: profiles.get(oneTime.profileId), allowContact: oneTime.allowContact !== false, source: "once", schedule: oneTime };
   const recurring = policy.schedules.find(schedule => schedule.enabled && schedule.type === "recurring" && recurringMatches(schedule, now, timeZone));
-  if (recurring) return { profile: profiles.get(recurring.profileId), source: "recurring", schedule: recurring };
-  return { profile: profiles.get(policy.defaultProfileId), source: "default", schedule: null };
+  if (recurring) return { profile: profiles.get(recurring.profileId), allowContact: recurring.allowContact !== false, source: "recurring", schedule: recurring };
+  return { profile: profiles.get(policy.defaultProfileId), allowContact: policy.defaultAllowContact !== false, source: "default", schedule: null };
 }
 
 function loadPolicyState() {

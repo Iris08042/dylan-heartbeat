@@ -887,6 +887,7 @@ function heartbeatPolicySnapshot() {
     active: {
       profileId: selected.profile?.id || null,
       profileName: selected.profile?.name || "",
+      allowContact: selected.allowContact !== false,
       source: selected.source,
       scheduleId: selected.schedule?.id || null,
       scheduleName: selected.schedule?.name || ""

@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { getLastUserTime, userMessageSnapshot } = require("../wake_up");
+const { contactAllowedForWake, getLastUserTime, userMessageSnapshot } = require("../wake_up");
 
 test("prefers the synced numeric user timestamp", () => {
   const messages = [{ role: "user", content: "没有时间前缀", timestamp: 1700000000000 }];
@@ -37,4 +37,11 @@ test("does not discard a result when only older read context changes", () => {
     before[1]
   ];
   assert.equal(userMessageSnapshot(before), userMessageSnapshot(after));
+});
+
+test("contact is allowed only when both policy checks allow it", () => {
+  assert.equal(contactAllowedForWake({ allowContact: true }, { allowContact: true }), true);
+  assert.equal(contactAllowedForWake({ allowContact: false }, { allowContact: true }), false);
+  assert.equal(contactAllowedForWake({ allowContact: true }, { allowContact: false }), false);
+  assert.equal(contactAllowedForWake({}, {}), true);
 });

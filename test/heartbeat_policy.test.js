@@ -11,22 +11,30 @@ test("heartbeat policy selects overrides and cross-midnight schedules", () => {
   try {
     const { activeProfile, defaultPolicy, normalizePolicy, savePolicy } = require("../heartbeat_policy");
     const policy = defaultPolicy();
+    policy.defaultAllowContact = false;
     policy.schedules.push({
       id: "night",
       name: "夜间静默",
       enabled: true,
       type: "recurring",
       profileId: "silent",
+      allowContact: false,
       days: [1],
       start: "23:00",
       end: "07:00"
     });
     savePolicy(policy);
-    assert.equal(activeProfile(policy, new Date("2026-08-10T16:30:00Z"), "Asia/Shanghai").profile.id, "silent");
-    assert.equal(activeProfile(policy, new Date("2026-08-11T07:00:00Z"), "Asia/Shanghai").profile.id, "normal");
+    const scheduled = activeProfile(policy, new Date("2026-08-10T16:30:00Z"), "Asia/Shanghai");
+    assert.equal(scheduled.profile.id, "silent");
+    assert.equal(scheduled.allowContact, false);
+    const defaulted = activeProfile(policy, new Date("2026-08-11T07:00:00Z"), "Asia/Shanghai");
+    assert.equal(defaulted.profile.id, "normal");
+    assert.equal(defaulted.allowContact, false);
 
-    policy.override = { profileId: "very-active", until: "2026-08-12T00:00:00.000Z" };
-    assert.equal(activeProfile(normalizePolicy(policy), new Date("2026-08-11T16:00:00Z"), "Asia/Shanghai").source, "override");
+    policy.override = { profileId: "very-active", allowContact: false, until: "2026-08-12T00:00:00.000Z" };
+    const overridden = activeProfile(normalizePolicy(policy), new Date("2026-08-11T16:00:00Z"), "Asia/Shanghai");
+    assert.equal(overridden.source, "override");
+    assert.equal(overridden.allowContact, false);
   } finally {
     if (previousDataDir === undefined) delete process.env.DATA_DIR;
     else process.env.DATA_DIR = previousDataDir;
@@ -67,4 +75,26 @@ test("heartbeat master switch stops wake eligibility", () => {
   });
   assert.equal(result.due, false);
   assert.equal(result.reason, "disabled");
+});
+
+test("legacy policies default every contact permission to allowed", () => {
+  const { defaultPolicy, normalizePolicy } = require("../heartbeat_policy");
+  const legacy = defaultPolicy();
+  delete legacy.defaultAllowContact;
+  legacy.schedules = [{
+    id: "legacy",
+    name: "legacy",
+    enabled: true,
+    type: "recurring",
+    profileId: "normal",
+    days: [1],
+    start: "09:00",
+    end: "10:00"
+  }];
+  legacy.override = { profileId: "low", until: null };
+  const normalized = normalizePolicy(legacy);
+  assert.equal(normalized.version, 2);
+  assert.equal(normalized.defaultAllowContact, true);
+  assert.equal(normalized.schedules[0].allowContact, true);
+  assert.equal(normalized.override.allowContact, true);
 });

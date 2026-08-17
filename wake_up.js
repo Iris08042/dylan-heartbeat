@@ -527,7 +527,14 @@ async function runWakeUp() {
     pendingInbox,
     date => formatDateTimeInTimeZone(date, TIME_ZONE)
   );
-  const wakePrompt = `${buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext)}\n\n${pendingInboxContext}`;
+  const contactPermissionContext = policyDecision.allowContact === false
+    ? "当前允许主动联系：false（免打扰）。你仍可以照常思考、写日记和调用后台工具，但不能主动联系用户，也不能输出准备发给用户的话。"
+    : "当前允许主动联系：true（可打扰）。你可以照常自主判断是否联系用户。";
+  const wakePrompt = [
+    buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext),
+    pendingInboxContext,
+    contactPermissionContext
+  ].filter(Boolean).join("\n\n");
   const wakeContextMessages = messagesForWakeContext(messages);
   const recentMessages = wakeContextMessages
     .filter(msg => msg.role === "user" || msg.role === "assistant")
@@ -612,6 +619,12 @@ ${historyText}`
   const diarySaved = appendDiaryEntry(diaryResult.diaryContent);
   if (!diaryResult.remainingText) {
     console.log(diarySaved ? "模型本次只写了日记" : "模型本次返回空内容");
+    savePolicyState({ lastDecisionAt: Date.now(), lastDecisionResult: "no_action" });
+    return;
+  }
+
+  if (wakeDecision.type === "contact" && !contactAllowedForWake(policyDecision, latestPolicyDecision)) {
+    console.log("当前为免打扰状态，已拦截模型返回的主动联系；未写入收件箱或发送推送");
     savePolicyState({ lastDecisionAt: Date.now(), lastDecisionResult: "no_action" });
     return;
   }
@@ -706,6 +719,10 @@ function getCheckIntervalMs() {
   return 60 * 1000;
 }
 
+function contactAllowedForWake(initialDecision, latestDecision) {
+  return initialDecision?.allowContact !== false && latestDecision?.allowContact !== false;
+}
+
 async function scheduleNextCheck() {
   try {
     // 发送心跳
@@ -739,4 +756,4 @@ if (require.main === module) {
   console.log("==================================\n");
 }
 
-module.exports = { getLastUserTime, requestWakeDecision, userMessageSnapshot };
+module.exports = { contactAllowedForWake, getLastUserTime, requestWakeDecision, userMessageSnapshot };
