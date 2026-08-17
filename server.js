@@ -3,6 +3,7 @@ require("dotenv").config({ quiet: true });
 const Fastify = require("fastify");
 const fs = require("fs-extra");
 const path = require("path");
+const { Readable } = require("node:stream");
 const {
   PROJECT_DIR,
   ensureDataDir,
@@ -43,6 +44,7 @@ const {
   zonedWallTimeToDate
 } = require("./time_utils");
 const { createCloudBackupStore } = require("./cloud_backup");
+const { ProviderRelayError, forwardProviderRequest } = require("./provider_relay");
 const {
   createOmbreDashboardClient,
   mapOmbreDashboardError,
@@ -623,6 +625,32 @@ app.addHook("onRequest", (req, reply, done) => {
 });
 
 app.get("/healthz", async () => ({ status: "ok" }));
+
+// ========================
+// Provider relay
+// ========================
+app.post("/api/provider-relay", async (req, reply) => {
+  try {
+    const upstream = await forwardProviderRequest(req.body);
+    reply
+      .code(upstream.status)
+      .header("Cache-Control", "no-store, no-transform")
+      .header("X-Accel-Buffering", "no");
+    const contentType = upstream.headers.get("content-type");
+    if (contentType) reply.header("Content-Type", contentType);
+    if (!upstream.body) return reply.send(await upstream.text());
+    return reply.send(Readable.fromWeb(upstream.body));
+  } catch (error) {
+    if (error instanceof ProviderRelayError) {
+      return reply.code(error.status).send({ error: { message: error.message, type: error.type } });
+    }
+    console.error(JSON.stringify({
+      event: "provider_relay_error",
+      message: error instanceof Error ? error.message : String(error)
+    }));
+    return reply.code(502).send({ error: { message: "provider relay 请求失败。", type: "relay_error" } });
+  }
+});
 
 // ========================
 // Models
