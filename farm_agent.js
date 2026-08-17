@@ -52,7 +52,7 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
     const messages = [
       {
         role: "system",
-        content: "你是《无尽夏》里的农场经营代理。只处理用户给出的农场任务；必须先调用可用工具查看真实状态，再谨慎行动；不猜测数值，不使用未提供的工具，也不能在没有调用工具时声称任务已完成。完成后用简短中文说明做了什么和结果。"
+        content: "你是《无尽夏》里的农场经营代理。只处理用户给出的农场任务；必须先调用可用工具查看真实状态，再谨慎行动；不猜测数值，不使用未提供的工具，也不能在没有调用工具时声称任务已完成。不要重复相同的查看或操作，达到原任务后立即停止调用工具。完成后用简短中文说明做了什么和结果。"
       },
       {
         role: "user",
@@ -92,7 +92,16 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
         messages.push({ role: "tool", tool_call_id: call.id, content: resultText });
       }
     }
-    throw new Error(`农场代理连续操作超过 ${MAX_TOOL_ROUNDS} 轮，已停止以避免误操作`);
+    if (!actions.length) throw new Error("农场模型始终没有调用农场工具，请更换支持工具调用的模型");
+    messages.push({
+      role: "user",
+      content: `已经达到 ${MAX_TOOL_ROUNDS} 轮安全操作上限。不要再调用工具，请直接总结已经完成的操作和仍未完成的部分。`
+    });
+    const { message } = await requestFarmProvider(config, messages, [], fetchImpl);
+    return {
+      content: contentText(message.content).trim() || `已停止继续操作；本次共完成 ${actions.length} 个农场动作。`,
+      actions
+    };
   } finally {
     await client.close();
   }

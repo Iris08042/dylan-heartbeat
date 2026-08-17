@@ -108,3 +108,47 @@ test("farm agent corrects a model that answers before using a farm tool", async 
   assert.deepEqual(result.actions.map(action => action.name), ["farm"]);
   assert.equal(modelRound, 3);
 });
+
+test("farm agent safely summarizes completed work at the operation limit", async () => {
+  let modelRound = 0;
+  const fetchImpl = async (url, init) => {
+    const body = init?.body ? JSON.parse(init.body) : null;
+    if (String(url).includes("farm.catmemo.fun")) {
+      if (body?.method === "initialize") return jsonResponse({ jsonrpc: "2.0", id: body.id, result: {} }, { headers: { "Mcp-Session-Id": "session-1" } });
+      if (body?.method === "notifications/initialized") return new Response("", { status: 202 });
+      if (body?.method === "tools/list") return jsonResponse({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: { tools: [{ name: "farm", description: "操作农场", inputSchema: { type: "object", properties: { action: { type: "string" } } } }] }
+      });
+      if (body?.method === "tools/call") return jsonResponse({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: { content: [{ type: "text", text: "操作成功" }] }
+      });
+      if (init?.method === "DELETE") return jsonResponse({ ok: true });
+    }
+    modelRound += 1;
+    if (!body.tools) return jsonResponse({ choices: [{ message: { content: "已到安全上限，完成六次操作后停止。" } }] });
+    return jsonResponse({ choices: [{ message: {
+      content: "",
+      tool_calls: [{ id: `call-${modelRound}`, type: "function", function: { name: "farm", arguments: `{"action":"step-${modelRound}"}` } }]
+    } }] });
+  };
+
+  const result = await runFarmAgent({
+    instruction: "经营一下农场",
+    config: {
+      agentKey: "secret-agent",
+      baseUrl: "https://models.example.com/v1",
+      apiKey: "secret-model",
+      model: "cheap-model",
+      enabledToolNames: ["farm"]
+    },
+    fetchImpl
+  });
+
+  assert.equal(result.content, "已到安全上限，完成六次操作后停止。");
+  assert.equal(result.actions.length, 6);
+  assert.equal(modelRound, 7);
+});
