@@ -64,6 +64,24 @@ test("provider relay sanitizes transport headers and forwards the selected provi
   assert.deepEqual(sanitizeRelayHeaders({ Host: "drop", "X-Api-Key": "keep" }), { "X-Api-Key": "keep" });
 });
 
+test("provider relay forwards authenticated model-list reads as GET without a body", async () => {
+  const calls = [];
+  await forwardProviderRequest({
+    endpoint: "https://api.example.com/v1/models",
+    headers: { Authorization: "Bearer upstream-key" },
+    method: "GET"
+  }, {
+    lookupAddress: publicLookup,
+    fetchImpl: async (...args) => {
+      calls.push(args);
+      return new Response('{"data":[]}', { status: 200 });
+    }
+  });
+
+  assert.equal(calls[0][1].method, "GET");
+  assert.equal("body" in calls[0][1], false);
+});
+
 test("provider relay requires the selected provider authentication header", async () => {
   await assert.rejects(
     forwardProviderRequest({

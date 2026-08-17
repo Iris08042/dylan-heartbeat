@@ -109,11 +109,12 @@ async function forwardProviderRequest(payload, options = {}) {
   if (!hasRelayAuthHeader(headers)) {
     throw new ProviderRelayError("relay 请求缺少上游认证头。", 400, "missing_upstream_auth");
   }
+  const method = payload?.method === "GET" ? "GET" : "POST";
   const fetchImpl = options.fetchImpl || fetch;
   return fetchImpl(validatedEndpoint, {
-    method: "POST",
+    method,
     headers,
-    body: JSON.stringify(payload?.body ?? {})
+    ...(method === "POST" ? { body: JSON.stringify(payload?.body ?? {}) } : {})
   });
 }
 
