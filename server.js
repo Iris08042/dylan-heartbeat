@@ -46,6 +46,14 @@ const {
 const { createCloudBackupStore } = require("./cloud_backup");
 const { ProviderRelayError, forwardProviderRequest } = require("./provider_relay");
 const {
+  loadFarmConfig,
+  publicFarmConfig,
+  resolveFarmCandidate,
+  saveFarmConfig
+} = require("./farm_config");
+const { inspectFarmTools } = require("./farm_mcp");
+const { runFarmAgent } = require("./farm_agent");
+const {
   createOmbreDashboardClient,
   mapOmbreDashboardError,
   normalizeOmbreBucket
@@ -1144,6 +1152,144 @@ app.post("/api/polaris/heartbeat/model/test", async (req, reply) => {
   } catch (err) {
     reply.code(400).send({ error: err.message });
   }
+});
+
+function farmAgentKeyCandidate(raw = {}) {
+  const supplied = String(raw.agentKey || "").trim();
+  const agentKey = supplied || loadFarmConfig().agentKey;
+  if (!agentKey) throw new Error("请先填写农场 Agent Key");
+  return agentKey;
+}
+
+function publicFarmTools(tools) {
+  return tools.map(tool => ({
+    name: String(tool?.name || ""),
+    description: String(tool?.description || ""),
+    inputSchema: tool?.inputSchema && typeof tool.inputSchema === "object"
+      ? tool.inputSchema
+      : { type: "object", properties: {} }
+  })).filter(tool => tool.name);
+}
+
+app.get("/api/polaris/farm/config", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    reply.send(publicFarmConfig());
+  } catch (err) {
+    reply.code(500).send({ error: err.message });
+  }
+});
+
+app.put("/api/polaris/farm/config", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    reply.send(publicFarmConfig(saveFarmConfig(req.body || {})));
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
+});
+
+app.post("/api/polaris/farm/models", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    const candidate = resolveFarmCandidate(req.body || {});
+    const result = await requestHeartbeatProvider(candidate.modelsUrl, candidate);
+    const models = Array.isArray(result?.data)
+      ? result.data.map(item => String(item?.id || "").trim()).filter(Boolean).sort()
+      : [];
+    reply.send({ models });
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
+});
+
+app.post("/api/polaris/farm/test-model", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    const candidate = resolveFarmCandidate(req.body || {});
+    if (!candidate.model) throw new Error("请先选择农场专用模型");
+    const result = await requestHeartbeatProvider(candidate.apiUrl, candidate, {
+      model: candidate.model,
+      messages: [{ role: "user", content: "Reply with OK." }],
+      temperature: 0.2,
+      stream: false
+    });
+    const content = result?.choices?.[0]?.message?.content;
+    reply.send({
+      ok: true,
+      model: String(result?.model || candidate.model),
+      reply: typeof content === "string" ? content.slice(0, 100) : ""
+    });
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
+});
+
+app.post("/api/polaris/farm/test-connection", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  try {
+    const tools = await inspectFarmTools(farmAgentKeyCandidate(req.body || {}));
+    reply.send({ ok: true, tools: publicFarmTools(tools) });
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
+});
+
+const MANAGED_FARM_TOOL = {
+  name: "farm_agent",
+  description: "让《无尽夏》的专用农场代理查看或经营我们的农场。具体农场工具与专用模型费用均由农场独立配置承担。",
+  inputSchema: {
+    type: "object",
+    properties: {
+      instruction: { type: "string", description: "要完成的具体农场任务" },
+      context: { type: "string", description: "可选的简短背景或偏好" }
+    },
+    required: ["instruction"],
+    additionalProperties: false
+  }
+};
+
+app.post("/api/polaris/farm/mcp", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  const body = req.body || {};
+  const id = body.id;
+  const sendResult = result => reply.send({ jsonrpc: "2.0", id, result });
+  const sendError = (code, message) => reply.send({ jsonrpc: "2.0", id, error: { code, message } });
+  try {
+    if (body.method === "notifications/initialized") return reply.code(202).send();
+    if (body.method === "initialize") {
+      return sendResult({
+        protocolVersion: "2025-03-26",
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: "endless-summer-farm", version: "1.0.0" }
+      });
+    }
+    if (body.method === "ping") return sendResult({});
+    if (body.method === "tools/list") return sendResult({ tools: [MANAGED_FARM_TOOL] });
+    if (body.method === "tools/call") {
+      if (body.params?.name !== MANAGED_FARM_TOOL.name) return sendError(-32602, "未知农场工具");
+      const result = await runFarmAgent({
+        instruction: body.params?.arguments?.instruction,
+        context: body.params?.arguments?.context
+      });
+      return sendResult({
+        content: [{ type: "text", text: result.content }],
+        structuredContent: result,
+        isError: false
+      });
+    }
+    return sendError(-32601, "不支持的 MCP 方法");
+  } catch (err) {
+    return sendResult({
+      content: [{ type: "text", text: `农场代理执行失败：${err.message}` }],
+      isError: true
+    });
+  }
+});
+
+app.delete("/api/polaris/farm/mcp", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  reply.code(200).send({ ok: true });
 });
 
 app.get("/api/polaris/heartbeat/prompt", async (req, reply) => {

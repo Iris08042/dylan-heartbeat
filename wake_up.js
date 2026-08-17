@@ -8,6 +8,8 @@ const { parseChatCompletionResponse } = require("./upstream_response");
 const { messagesForWakeContext } = require("./special_events");
 const { parseWakeDecision, thoughtInboxContent } = require("./wake_decision");
 const { loadHeartbeatModelConfig } = require("./heartbeat_model_config");
+const { loadFarmConfig } = require("./farm_config");
+const { runFarmAgent } = require("./farm_agent");
 const { loadHeartbeatPromptConfig } = require("./heartbeat_prompt_config");
 const { listPendingInboxEvents } = require("./heartbeat_inbox");
 const { buildUnreadInboxContext } = require("./heartbeat_inbox_context");
@@ -390,7 +392,7 @@ function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
 `;
 }
 
-async function requestHeartbeatModel(heartbeatModel, messages) {
+async function requestHeartbeatModel(heartbeatModel, messages, tools = []) {
   const response = await fetch(heartbeatModel.apiUrl, {
     method: "POST",
     signal: AbortSignal.timeout(WAKE_UPSTREAM_TIMEOUT_MS),
@@ -403,7 +405,8 @@ async function requestHeartbeatModel(heartbeatModel, messages) {
       messages,
       temperature: 0.8,
       top_p: 0.95,
-      stream: false
+      stream: false,
+      ...(tools.length ? { tools, tool_choice: "auto" } : {})
     })
   });
 
@@ -417,9 +420,73 @@ async function requestHeartbeatModel(heartbeatModel, messages) {
   if (!response.ok) {
     throw new Error(`模型请求失败（HTTP ${response.status}）：${responseText.slice(0, 300)}`);
   }
-  const text = normalizeContentToText(data.choices?.[0]?.message?.content).trim();
+  const message = data.choices?.[0]?.message;
+  if (!message) throw new Error("主动消息模型没有返回 message");
+  const text = normalizeContentToText(message.content).trim();
   console.log(JSON.stringify({ choices: Array.isArray(data.choices) ? data.choices.length : 0, ai_text_chars: text.length }));
-  return text;
+  return message;
+}
+
+const WAKE_FARM_TOOL = {
+  type: "function",
+  function: {
+    name: "farm_agent",
+    description: "让独立的农场代理查看或经营我们的农场。仅在你自主醒来并确实想做农场活动时调用；农场代理会使用另一套专用模型。",
+    parameters: {
+      type: "object",
+      properties: {
+        instruction: { type: "string", description: "你想让农场代理完成的具体任务" },
+        context: { type: "string", description: "可选的动机、偏好或限制" }
+      },
+      required: ["instruction"],
+      additionalProperties: false
+    }
+  }
+};
+
+async function requestWakeDecision(heartbeatModel, wakeMessages) {
+  let farmConfig;
+  try { farmConfig = loadFarmConfig(); } catch (error) {
+    console.warn(`农场配置不可用，本次唤醒不加载农场：${error.message}`);
+  }
+  const farmAvailable = Boolean(
+    farmConfig?.autonomousEnabled && farmConfig.agentKey
+    && farmConfig.baseUrl && farmConfig.apiKey && farmConfig.model
+  );
+  const tools = farmAvailable ? [WAKE_FARM_TOOL] : [];
+  const messages = wakeMessages.map(message => ({ ...message }));
+
+  for (let round = 0; round < 3; round += 1) {
+    const message = await requestHeartbeatModel(heartbeatModel, messages, tools);
+    const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+    messages.push({
+      role: "assistant",
+      content: message.content ?? "",
+      ...(toolCalls.length ? { tool_calls: toolCalls } : {})
+    });
+    if (!toolCalls.length) return normalizeContentToText(message.content).trim();
+
+    for (const call of toolCalls) {
+      let resultText;
+      if (call?.function?.name !== "farm_agent") {
+        resultText = "该后台工具不存在。";
+      } else {
+        try {
+          const args = JSON.parse(call.function.arguments || "{}");
+          const result = await runFarmAgent({
+            instruction: args.instruction,
+            context: args.context,
+            config: farmConfig
+          });
+          resultText = JSON.stringify(result);
+        } catch (error) {
+          resultText = `农场代理执行失败：${error.message}`;
+        }
+      }
+      messages.push({ role: "tool", tool_call_id: call.id, content: resultText });
+    }
+  }
+  throw new Error("主动消息模型连续调用农场工具次数过多，已停止本次唤醒");
 }
 
 async function runWakeUp() {
@@ -521,7 +588,7 @@ ${historyText}`
   }
 
   console.log("\nWake Result Summary:\n");
-  const rawAiText = await requestHeartbeatModel(heartbeatModel, wakeMessages);
+  const rawAiText = await requestWakeDecision(heartbeatModel, wakeMessages);
   const diaryResult = extractDiaryFromResponse(rawAiText);
   const wakeDecision = parseWakeDecision(diaryResult.remainingText);
 
@@ -672,4 +739,4 @@ if (require.main === module) {
   console.log("==================================\n");
 }
 
-module.exports = { getLastUserTime, userMessageSnapshot };
+module.exports = { getLastUserTime, requestWakeDecision, userMessageSnapshot };

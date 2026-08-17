@@ -9,3 +9,5 @@ presets.json
 wake_prompt.txt
 diary/
 data/
+farm_config.json
+farm_config.json.*
