@@ -26,6 +26,8 @@ test("farm config keeps secrets server-side and preserves blank secret updates",
     enabledToolNames: ["water", "water", "status"]
   });
   assert.equal(saved.baseUrl, "https://api.example.com/v1");
+  assert.equal(saved.protocol, "openai-completions");
+  assert.equal(saved.path, "/chat/completions");
   assert.deepEqual(saved.enabledToolNames, ["status", "water"]);
 
   const visible = publicFarmConfig(saved);
@@ -44,6 +46,7 @@ test("farm config keeps secrets server-side and preserves blank secret updates",
 test("farm model candidate can use unsaved key without exposing it", () => {
   const candidate = resolveFarmCandidate({ apiKey: "temporary", model: "test-model" });
   assert.equal(candidate.apiKey, "temporary");
-  assert.equal(candidate.apiUrl, "https://api.example.com/v1/chat/completions");
-  assert.equal(candidate.modelsUrl, "https://api.example.com/v1/models");
+  assert.equal(candidate.protocol, "openai-completions");
+  assert.equal(candidate.baseUrl, "https://api.example.com/v1");
+  assert.equal(candidate.path, "/chat/completions");
 });

@@ -53,6 +53,7 @@ const {
 } = require("./farm_config");
 const { inspectFarmTools } = require("./farm_mcp");
 const { runFarmAgent } = require("./farm_agent");
+const { discoverFarmModels, requestFarmProvider } = require("./farm_provider");
 const {
   createOmbreDashboardClient,
   mapOmbreDashboardError,
@@ -1193,10 +1194,7 @@ app.post("/api/polaris/farm/models", async (req, reply) => {
   if (!requireHeartbeatInboxToken(req, reply)) return;
   try {
     const candidate = resolveFarmCandidate(req.body || {});
-    const result = await requestHeartbeatProvider(candidate.modelsUrl, candidate);
-    const models = Array.isArray(result?.data)
-      ? result.data.map(item => String(item?.id || "").trim()).filter(Boolean).sort()
-      : [];
+    const models = await discoverFarmModels(candidate);
     reply.send({ models });
   } catch (err) {
     reply.code(400).send({ error: err.message });
@@ -1208,17 +1206,11 @@ app.post("/api/polaris/farm/test-model", async (req, reply) => {
   try {
     const candidate = resolveFarmCandidate(req.body || {});
     if (!candidate.model) throw new Error("请先选择农场专用模型");
-    const result = await requestHeartbeatProvider(candidate.apiUrl, candidate, {
-      model: candidate.model,
-      messages: [{ role: "user", content: "Reply with OK." }],
-      temperature: 0.2,
-      stream: false
-    });
-    const content = result?.choices?.[0]?.message?.content;
+    const result = await requestFarmProvider(candidate, [{ role: "user", content: "Reply with OK." }]);
     reply.send({
       ok: true,
-      model: String(result?.model || candidate.model),
-      reply: typeof content === "string" ? content.slice(0, 100) : ""
+      model: result.model,
+      reply: String(result.message.content || "").slice(0, 100)
     });
   } catch (err) {
     reply.code(400).send({ error: err.message });

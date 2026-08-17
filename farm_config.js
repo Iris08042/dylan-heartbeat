@@ -1,8 +1,13 @@
 const fs = require("fs");
 const { runtimeFile, writeJsonAtomicSync } = require("./runtime_paths");
-const { chatCompletionsUrl, modelsUrl, normalizeBaseUrl } = require("./heartbeat_model_config");
+const {
+  defaultFarmProviderPath,
+  normalizeFarmBaseUrl,
+  normalizeFarmProtocol,
+  normalizeFarmProviderPath
+} = require("./farm_provider");
 
-const CONFIG_VERSION = 1;
+const CONFIG_VERSION = 2;
 const DEFAULT_HUMAN_URL = "https://farm.catmemo.fun/";
 
 function configFile() {
@@ -15,7 +20,9 @@ function defaultFarmConfig() {
     humanUrl: DEFAULT_HUMAN_URL,
     agentKey: "",
     autonomousEnabled: false,
+    protocol: "openai-completions",
     baseUrl: "",
+    path: defaultFarmProviderPath("openai-completions"),
     apiKey: "",
     model: "",
     enabledToolNames: []
@@ -43,12 +50,16 @@ function normalizeToolNames(value) {
 function normalizeStoredConfig(raw) {
   const defaults = defaultFarmConfig();
   const baseUrlInput = String(raw?.baseUrl || "").trim();
+  const protocol = normalizeFarmProtocol(raw?.protocol || defaults.protocol);
+  const providerPath = normalizeFarmProviderPath(protocol, raw?.path || defaults.path);
   return {
     version: CONFIG_VERSION,
     humanUrl: normalizeHumanUrl(raw?.humanUrl || defaults.humanUrl),
     agentKey: String(raw?.agentKey || "").trim(),
     autonomousEnabled: raw?.autonomousEnabled === true,
-    baseUrl: baseUrlInput ? normalizeBaseUrl(baseUrlInput) : "",
+    protocol,
+    baseUrl: baseUrlInput ? normalizeFarmBaseUrl(baseUrlInput, providerPath) : "",
+    path: providerPath,
     apiKey: String(raw?.apiKey || "").trim(),
     model: String(raw?.model || "").trim(),
     enabledToolNames: normalizeToolNames(raw?.enabledToolNames)
@@ -71,7 +82,9 @@ function publicFarmConfig(config = loadFarmConfig()) {
     humanUrl: config.humanUrl,
     agentKeyConfigured: Boolean(config.agentKey),
     autonomousEnabled: config.autonomousEnabled,
+    protocol: config.protocol,
     baseUrl: config.baseUrl,
+    path: config.path,
     model: config.model,
     apiKeyConfigured: Boolean(config.apiKey),
     enabledToolNames: [...config.enabledToolNames]
@@ -106,13 +119,15 @@ function resolveFarmCandidate(raw = {}) {
     ? String(raw.apiKey).trim()
     : existing.apiKey;
   const model = String(raw.model || existing.model || "").trim();
+  const protocol = normalizeFarmProtocol(raw.protocol || existing.protocol);
+  const providerPath = normalizeFarmProviderPath(protocol, raw.path || existing.path);
   if (!baseUrlInput || !apiKey) throw new Error("请先填写农场专用 API 地址和 API Key");
   return {
-    baseUrl: normalizeBaseUrl(baseUrlInput),
+    protocol,
+    baseUrl: normalizeFarmBaseUrl(baseUrlInput, providerPath),
+    path: providerPath,
     apiKey,
-    model,
-    apiUrl: chatCompletionsUrl(baseUrlInput),
-    modelsUrl: modelsUrl(baseUrlInput)
+    model
   };
 }
 

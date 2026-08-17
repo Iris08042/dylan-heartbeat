@@ -1,6 +1,6 @@
 const { loadFarmConfig } = require("./farm_config");
 const { FarmMcpClient } = require("./farm_mcp");
-const { parseChatCompletionResponse } = require("./upstream_response");
+const { requestFarmProvider } = require("./farm_provider");
 
 const MAX_TOOL_ROUNDS = 6;
 
@@ -35,39 +35,6 @@ function selectTools(tools, enabledToolNames) {
   return tools.filter(tool => enabled.has(tool.name));
 }
 
-async function requestFarmModel(config, messages, tools, fetchImpl) {
-  const response = await fetchImpl(config.apiUrl, {
-    method: "POST",
-    signal: AbortSignal.timeout(45_000),
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: config.model,
-      messages,
-      tools,
-      tool_choice: "auto",
-      temperature: 0.4,
-      stream: false
-    })
-  });
-  const text = await response.text();
-  let parsed;
-  try {
-    parsed = parseChatCompletionResponse(text, response.headers.get("content-type") || "");
-  } catch (error) {
-    throw new Error(`农场模型响应无法解析（HTTP ${response.status}）：${error.message}`);
-  }
-  if (!response.ok) {
-    const message = parsed?.error?.message || text.slice(0, 300);
-    throw new Error(`农场模型请求失败（HTTP ${response.status}）：${message}`);
-  }
-  const message = parsed?.choices?.[0]?.message;
-  if (!message) throw new Error("农场模型没有返回 message");
-  return message;
-}
-
 async function runFarmAgent({ instruction, context = "", config = loadFarmConfig(), fetchImpl = fetch } = {}) {
   const task = String(instruction || "").trim();
   if (!task) throw new Error("农场任务不能为空");
@@ -94,14 +61,13 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
     ];
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
-      const message = await requestFarmModel({
-        ...config,
-        apiUrl: `${String(config.baseUrl).replace(/\/+$/, "")}/chat/completions`
-      }, messages, tools, fetchImpl);
+      const { message } = await requestFarmProvider(config, messages, tools, fetchImpl);
       const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
       messages.push({
         role: "assistant",
         content: message.content ?? "",
+        ...(message.provider_items ? { provider_items: message.provider_items } : {}),
+        ...(message.provider_parts ? { provider_parts: message.provider_parts } : {}),
         ...(toolCalls.length ? { tool_calls: toolCalls } : {})
       });
       if (!toolCalls.length) {
