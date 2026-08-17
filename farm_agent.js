@@ -52,7 +52,7 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
     const messages = [
       {
         role: "system",
-        content: "你是《无尽夏》里的农场经营代理。只处理用户给出的农场任务；先查看状态再谨慎行动，不猜测数值，不使用未提供的工具。完成后用简短中文说明做了什么和结果。"
+        content: "你是《无尽夏》里的农场经营代理。只处理用户给出的农场任务；必须先调用可用工具查看真实状态，再谨慎行动；不猜测数值，不使用未提供的工具，也不能在没有调用工具时声称任务已完成。完成后用简短中文说明做了什么和结果。"
       },
       {
         role: "user",
@@ -71,6 +71,13 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
         ...(toolCalls.length ? { tool_calls: toolCalls } : {})
       });
       if (!toolCalls.length) {
+        if (!actions.length) {
+          messages.push({
+            role: "user",
+            content: "你还没有调用农场工具。请先调用可用工具查看真实状态，再根据原任务继续；不要只用文字回答。"
+          });
+          continue;
+        }
         return { content: contentText(message.content).trim() || "农场任务已经处理完成。", actions };
       }
 

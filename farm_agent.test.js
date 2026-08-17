@@ -63,3 +63,48 @@ test("farm agent delegates model tool calls to the upstream MCP", async () => {
   assert.ok(requests.some(item => item.body?.method === "tools/call"));
   assert.ok(requests.some(item => item.url === "https://models.example.com/v1/chat/completions"));
 });
+
+test("farm agent corrects a model that answers before using a farm tool", async () => {
+  let modelRound = 0;
+  const fetchImpl = async (url, init) => {
+    const body = init?.body ? JSON.parse(init.body) : null;
+    if (String(url).includes("farm.catmemo.fun")) {
+      if (body?.method === "initialize") return jsonResponse({ jsonrpc: "2.0", id: body.id, result: {} }, { headers: { "Mcp-Session-Id": "session-1" } });
+      if (body?.method === "notifications/initialized") return new Response("", { status: 202 });
+      if (body?.method === "tools/list") return jsonResponse({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: { tools: [{ name: "farm", description: "操作农场；查看状态时传 action=status", inputSchema: { type: "object", properties: { action: { type: "string" } } } }] }
+      });
+      if (body?.method === "tools/call") return jsonResponse({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: { content: [{ type: "text", text: "农场状态良好" }] }
+      });
+      if (init?.method === "DELETE") return jsonResponse({ ok: true });
+    }
+    modelRound += 1;
+    if (modelRound === 1) return jsonResponse({ choices: [{ message: { content: "农场状态应该不错。" } }] });
+    if (modelRound === 2) return jsonResponse({ choices: [{ message: {
+      content: "",
+      tool_calls: [{ id: "call-1", type: "function", function: { name: "farm", arguments: '{"action":"status"}' } }]
+    } }] });
+    return jsonResponse({ choices: [{ message: { content: "我实际查看过了，农场状态良好。" } }] });
+  };
+
+  const result = await runFarmAgent({
+    instruction: "只查看农场状态",
+    config: {
+      agentKey: "secret-agent",
+      baseUrl: "https://models.example.com/v1",
+      apiKey: "secret-model",
+      model: "cheap-model",
+      enabledToolNames: ["farm"]
+    },
+    fetchImpl
+  });
+
+  assert.equal(result.content, "我实际查看过了，农场状态良好。");
+  assert.deepEqual(result.actions.map(action => action.name), ["farm"]);
+  assert.equal(modelRound, 3);
+});
