@@ -13,6 +13,7 @@ const { runFarmAgent } = require("./farm_agent");
 const { loadHeartbeatPromptConfig } = require("./heartbeat_prompt_config");
 const { listPendingInboxEvents } = require("./heartbeat_inbox");
 const { buildUnreadInboxContext } = require("./heartbeat_inbox_context");
+const { HEALTH_NOW_DESCRIPTION, getHealthNow } = require("./health_store");
 const {
   formatDateTimeInTimeZone,
   getDatePartsInTimeZone,
@@ -304,6 +305,19 @@ const WAKE_FARM_TOOL = {
   }
 };
 
+const WAKE_HEALTH_TOOL = {
+  type: "function",
+  function: {
+    name: "health_now",
+    description: HEALTH_NOW_DESCRIPTION,
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    }
+  }
+};
+
 async function requestWakeDecision(heartbeatModel, wakeMessages) {
   let farmConfig;
   try { farmConfig = loadFarmConfig(); } catch (error) {
@@ -313,7 +327,7 @@ async function requestWakeDecision(heartbeatModel, wakeMessages) {
     farmConfig?.autonomousEnabled && farmConfig.agentKey
     && farmConfig.baseUrl && farmConfig.apiKey && farmConfig.model
   );
-  const tools = farmAvailable ? [WAKE_FARM_TOOL] : [];
+  const tools = [WAKE_HEALTH_TOOL, ...(farmAvailable ? [WAKE_FARM_TOOL] : [])];
   const messages = wakeMessages.map(message => ({ ...message }));
 
   for (let round = 0; round < 3; round += 1) {
@@ -328,7 +342,9 @@ async function requestWakeDecision(heartbeatModel, wakeMessages) {
 
     for (const call of toolCalls) {
       let resultText;
-      if (call?.function?.name !== "farm_agent") {
+      if (call?.function?.name === "health_now") {
+        resultText = getHealthNow().text;
+      } else if (call?.function?.name !== "farm_agent") {
         resultText = "该后台工具不存在。";
       } else {
         try {
@@ -346,7 +362,7 @@ async function requestWakeDecision(heartbeatModel, wakeMessages) {
       messages.push({ role: "tool", tool_call_id: call.id, content: resultText });
     }
   }
-  throw new Error("主动消息模型连续调用农场工具次数过多，已停止本次唤醒");
+  throw new Error("主动消息模型连续调用后台工具次数过多，已停止本次唤醒");
 }
 
 async function runWakeUp() {

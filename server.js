@@ -57,6 +57,11 @@ const { discoverFarmModels, requestFarmProvider } = require("./farm_provider");
 const { executeScheduledMessageTool } = require("./scheduled_messages");
 const { processDueScheduledMessages } = require("./scheduled_message_runtime");
 const {
+  HEALTH_NOW_DESCRIPTION,
+  getHealthNow,
+  ingestHealthPayload
+} = require("./health_store");
+const {
   createOmbreDashboardClient,
   mapOmbreDashboardError,
   normalizeOmbreBucket
@@ -478,6 +483,19 @@ function requireHeartbeatInboxToken(req, reply) {
   return true;
 }
 
+function requireHealthIngestToken(req, reply) {
+  const configured = String(process.env.HEALTH_INGEST_TOKEN || "").trim();
+  if (!configured) {
+    reply.code(503).send({ error: "HEALTH_INGEST_TOKEN is not configured" });
+    return false;
+  }
+  if (readBearerToken(req) !== configured) {
+    reply.code(401).send({ error: "Health ingest token is invalid or missing" });
+    return false;
+  }
+  return true;
+}
+
 function readBackupBodyLimitBytes() {
   const configured = Number(process.env.POLARIS_BACKUP_BODY_LIMIT_MB);
   const mb = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_BACKUP_BODY_LIMIT_MB;
@@ -523,6 +541,7 @@ const PREFERRED_ENV_ORDER = [
   "TARGET_API_KEY",
   "GATEWAY_API_KEY",
   "HEARTBEAT_INBOX_TOKEN",
+  "HEALTH_INGEST_TOKEN",
   "POLARIS_BACKUP_TOKEN",
   "POLARIS_BACKUP_BODY_LIMIT_MB",
   "OMBRE_DASHBOARD_URL",
@@ -878,6 +897,72 @@ app.put("/api/polaris/heartbeat/context", async (req, reply) => {
   } catch (err) {
     reply.code(400).send({ error: err.message });
   }
+});
+
+app.post("/api/polaris/health/ingest", async (req, reply) => {
+  if (!requireHealthIngestToken(req, reply)) return;
+  try {
+    const result = ingestHealthPayload(req.body || {});
+    console.log(JSON.stringify({
+      event: "health_data_ingested",
+      metrics: result.acceptedMetrics,
+      points: result.acceptedPoints
+    }));
+    reply.send({ ok: true, ...result });
+  } catch (err) {
+    reply.code(400).send({ error: err.message });
+  }
+});
+
+const HEALTH_NOW_TOOL = {
+  name: "health_now",
+  description: HEALTH_NOW_DESCRIPTION,
+  inputSchema: {
+    type: "object",
+    properties: {},
+    additionalProperties: false
+  }
+};
+
+app.post("/api/polaris/health/mcp", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  const body = req.body || {};
+  const id = body.id;
+  const sendResult = result => reply.send({ jsonrpc: "2.0", id, result });
+  const sendError = (code, message) => reply.send({ jsonrpc: "2.0", id, error: { code, message } });
+  try {
+    if (body.method === "notifications/initialized") return reply.code(202).send();
+    if (body.method === "initialize") {
+      return sendResult({
+        protocolVersion: "2025-03-26",
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: "endless-summer-health", version: "1.0.0" }
+      });
+    }
+    if (body.method === "ping") return sendResult({});
+    if (body.method === "tools/list") return sendResult({ tools: [HEALTH_NOW_TOOL] });
+    if (body.method === "tools/call") {
+      if (body.params?.name !== HEALTH_NOW_TOOL.name) return sendError(-32602, "未知健康工具");
+      const result = getHealthNow();
+      return sendResult({
+        content: [{ type: "text", text: result.text }],
+        structuredContent: result,
+        isError: false
+      });
+    }
+    return sendError(-32601, "不支持的 MCP 方法");
+  } catch (err) {
+    req.log.error({ err, event: "health_now_tool_failed" }, "health tool failed");
+    return sendResult({
+      content: [{ type: "text", text: `健康数据读取失败：${err.message}` }],
+      isError: true
+    });
+  }
+});
+
+app.delete("/api/polaris/health/mcp", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  reply.code(200).send({ ok: true });
 });
 
 function heartbeatPolicySnapshot() {
