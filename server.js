@@ -914,6 +914,11 @@ app.post("/api/polaris/health/ingest", async (req, reply) => {
   }
 });
 
+app.get("/api/polaris/health/status", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  reply.send(getHealthNow());
+});
+
 const HEALTH_NOW_TOOL = {
   name: "health_now",
   description: HEALTH_NOW_DESCRIPTION,

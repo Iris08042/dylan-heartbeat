@@ -35,6 +35,20 @@ test("accepts authenticated HAE uploads and exposes one health MCP tool", async 
     assert.deepEqual(accepted.json().acceptedMetrics, ["resting_heart_rate"]);
 
     const headers = { authorization: "Bearer polaris-tool-token" };
+    const rejectedStatus = await server.app.inject({
+      method: "GET",
+      url: "/api/polaris/health/status"
+    });
+    assert.equal(rejectedStatus.statusCode, 401);
+
+    const status = await server.app.inject({
+      method: "GET",
+      url: "/api/polaris/health/status",
+      headers
+    });
+    assert.equal(status.statusCode, 200);
+    assert.equal(status.json().metrics.resting_heart_rate.value.qty, 61);
+
     const list = await server.app.inject({
       method: "POST",
       url: "/api/polaris/health/mcp",
