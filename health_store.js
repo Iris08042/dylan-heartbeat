@@ -7,11 +7,11 @@ const METRICS = {
   heart_rate_variability: "心率变异性",
   resting_heart_rate: "静息心率",
   walking_heart_rate_average: "步行平均心率",
-  sleep_analysis: "睡眠",
-  sleep_score: "睡眠评分"
+  sleep_analysis: "睡眠"
 };
 
-const HEALTH_NOW_DESCRIPTION = "读取服务器最近收到的 Apple Health 数据快照，包括步数、心率、心率变异性、静息心率、步行平均心率、睡眠和睡眠评分。它不会现场测量；每项都带采样时间和上传时间，必须如实说明数据是否缺失或陈旧。";
+const HEALTH_UPLOAD_CURRENT_MS = 15 * 60 * 1000;
+const HEALTH_NOW_DESCRIPTION = "读取服务器最近收到的 Apple Health 数据快照，包括步数、心率、心率变异性、静息心率、步行平均心率和睡眠。它不会现场测量。以 HAE 到达服务器的同步时间判断新旧：15 分钟内是当前数据，超过 15 分钟是旧数据；无论新旧都返回，并必须明确说明同步时间。每项指标还带各自的实际采样时间。";
 
 function healthFile() {
   return runtimeFile("health_data.json");
@@ -121,7 +121,17 @@ function getHealthNow(now = Date.now()) {
       value: publicPoint(point)
     } : { label, available: false };
   }
-  const snapshot = { queriedAt: now, lastUploadAt: store.updatedAt, metrics };
+  const uploadAgeMs = store.updatedAt == null ? null : Math.max(0, now - store.updatedAt);
+  const freshness = uploadAgeMs == null
+    ? "missing"
+    : uploadAgeMs <= HEALTH_UPLOAD_CURRENT_MS ? "current" : "old";
+  const snapshot = {
+    queriedAt: now,
+    lastUploadAt: store.updatedAt,
+    uploadAgeMinutes: uploadAgeMs == null ? null : Math.floor(uploadAgeMs / 60_000),
+    freshness,
+    metrics
+  };
   return { ...snapshot, text: formatHealthNow(snapshot) };
 }
 
@@ -149,6 +159,13 @@ function metricValue(name, metric) {
 
 function formatHealthNow(snapshot) {
   const lines = ["Apple Health 最近数据（服务器缓存，不是现场测量）："];
+  if (snapshot.freshness === "missing") {
+    lines.push("同步状态：尚未收到 HAE 上传。");
+  } else if (snapshot.freshness === "old") {
+    lines.push(`同步状态：旧数据；HAE 最后于 ${new Date(snapshot.lastUploadAt).toISOString()} 同步（距今 ${snapshot.uploadAgeMinutes} 分钟）。以下数据仍可读取，但必须明确称为旧数据。`);
+  } else {
+    lines.push(`同步状态：当前数据；HAE 于 ${new Date(snapshot.lastUploadAt).toISOString()} 同步（距今 ${snapshot.uploadAgeMinutes} 分钟）。各指标仍须以各自采样时间为准。`);
+  }
   for (const [name, metric] of Object.entries(snapshot.metrics)) {
     if (metric.available === false) {
       lines.push(`- ${metric.label}：暂无数据`);
