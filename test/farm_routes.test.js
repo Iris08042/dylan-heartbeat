@@ -22,13 +22,15 @@ test("farm routes keep secrets private and expose one managed MCP tool", async (
         baseUrl: "https://provider.example/v1",
         apiKey: "private-model-key",
         model: "cheap-model",
-        autonomousEnabled: true
+        autonomousEnabled: true,
+        longTermGoal: "一起收集隐藏图鉴并分享新发现。"
       }
     });
     assert.equal(savedResponse.statusCode, 200);
     const visible = savedResponse.json();
     assert.equal(visible.agentKeyConfigured, true);
     assert.equal(visible.apiKeyConfigured, true);
+    assert.equal(visible.longTermGoal, "一起收集隐藏图鉴并分享新发现。");
     assert.equal(JSON.stringify(visible).includes("private-agent"), false);
     assert.equal(JSON.stringify(visible).includes("private-model-key"), false);
 
@@ -48,8 +50,8 @@ test("farm routes keep secrets private and expose one managed MCP tool", async (
       payload: { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }
     });
     assert.deepEqual(list.json().result.tools.map(tool => tool.name), ["farm_agent"]);
-    assert.match(list.json().result.tools[0].description, /继续完成当前合理事项/);
-    assert.match(list.json().result.tools[0].inputSchema.properties.instruction.description, /开放授权/);
+    assert.match(list.json().result.tools[0].description, /默认都允许代理/);
+    assert.match(list.json().result.tools[0].inputSchema.properties.instruction.description, /长期目标已经默认存在/);
 
     const unauthenticated = await server.app.inject({
       method: "GET",

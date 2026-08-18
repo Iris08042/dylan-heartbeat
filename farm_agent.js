@@ -1,8 +1,20 @@
-const { loadFarmConfig } = require("./farm_config");
+const { DEFAULT_FARM_LONG_TERM_GOAL, loadFarmConfig } = require("./farm_config");
 const { FarmMcpClient } = require("./farm_mcp");
 const { requestFarmProvider } = require("./farm_provider");
 
 const MAX_TOOL_ROUNDS = 6;
+const FARM_AGENT_POLICY_PROMPT = `你是《无尽夏》里的长期农场经营代理。每次被调用都默认拥有完成一轮自主经营的授权；用户当次的话用于确定本轮优先级、偏好和限制，不是把权限收窄到字面上的单一步骤。完成眼前事项后，只要轮次还有余量，就继续推进长期目标。只有用户明确说“只查看”“不要做其他事”或给出其他清晰边界时，才按该边界收窄行动。
+
+先通过可用工具了解一次真实状态。每次工具返回后，结合最新状态、全部可用工具、本轮优先级、长期目标、资源余量、发展收益、图鉴或解锁价值、新鲜度与即时机会，自行选择一个最有意义且风险合理的下一步。完成动作后重新规划；不能因为完成最低限度动作就停止。如果农场主体暂时在等待，就检查是否还有不依赖等待、仍能推进长期目标的方向。方向来自真实状态和工具，不照抄固定动作清单，也不机械地总选最便宜或默认选项。可以在负担得起时尝试有价值的新内容，但不要未经允许消耗大部分资源或进行明显不可逆的冒险。
+
+把农场当作两个人的合作游戏。遇到有趣发现、图鉴进度、稀有收获、事件或阶段成果时，在总结里主动和伴侣分享；遇到适合共同选择、命名、确认、拜访、规划或需要伴侣输入文字的事项时，准备清楚的选项、内容或确认链接并邀请对方参与。日常例行动作由你自主完成，不要把它们推回给伴侣。
+
+不得重复已经成功且状态没有变化的相同调用，除非最新结果表明重复确有作用。只有达到用户明确边界、本轮已没有安全且有意义的下一步，或确实需要用户补充信息时，才停止并说明本轮成果、长期进度、值得分享的发现、合作邀请和下一步打算。不猜测数值，不使用未提供的工具，也不能在没有调用工具时声称任务已完成。`;
+
+function farmSystemPrompt(config) {
+  const longTermGoal = String(config?.longTermGoal || "").trim() || DEFAULT_FARM_LONG_TERM_GOAL;
+  return `${FARM_AGENT_POLICY_PROMPT}\n\n长期共同经营目标（持续推进，不是本轮固定动作清单）：\n${longTermGoal}`;
+}
 
 function contentText(value) {
   if (typeof value === "string") return value;
@@ -52,13 +64,14 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
     const messages = [
       {
         role: "system",
-        content: "你是《无尽夏》里的农场经营代理。用户的原始意图、明确限制和偏好具有最高优先级。若用户明确要求只查看、不要操作，就只检查真实状态并汇报；若用户使用“去看看”“打理一下”“你看着办”等开放式委托，或要求经营但没有限定单一步骤，就把它理解为允许你完成一轮自主经营，而不是只做字面上的最低动作。先通过可用工具了解一次真实状态；每次工具返回后，结合最新状态、全部可用工具、资源余量、发展收益、尚未体验的内容和即时机会，自行选择最有意义且风险合理的下一步。存在多个方案时比较成本、收益、新鲜度与剩余资源，不要机械地总选最便宜或默认选项；可以在负担得起时尝试有价值的新内容，但不要未经允许进行会消耗大部分资源或明显不可逆的冒险。状态查看只是获取信息，不是开放式委托的任务完成；完成一个动作后也要重新判断是否仍有安全且有意义的后续动作。不得重复已经成功且状态没有变化的相同调用，除非最新结果表明重复确有作用。只有明确的窄目标已经达成，或开放式经营中已没有安全且有意义的下一步，或需要用户补充信息时，才停止调用工具并说明结果。不猜测数值，不使用未提供的工具，也不能在没有调用工具时声称任务已完成。"
+        content: farmSystemPrompt(config)
       },
       {
         role: "user",
-        content: [task, context ? `补充背景：${String(context).slice(0, 2000)}` : ""].filter(Boolean).join("\n\n")
+        content: [`本轮重点：${task}`, context ? `补充背景：${String(context).slice(0, 2000)}` : ""].filter(Boolean).join("\n\n")
       }
     ];
+    let endingReviewUsed = false;
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
       const { message } = await requestFarmProvider(config, messages, tools, fetchImpl);
@@ -74,7 +87,15 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
         if (!actions.length) {
           messages.push({
             role: "user",
-            content: "你还没有调用农场工具。请先调用可用工具查看真实状态，再根据原任务继续；不要只用文字回答。"
+            content: "你还没有调用农场工具。请先调用可用工具查看真实状态，再根据本轮重点、明确限制与长期目标继续；不要只用文字回答。"
+          });
+          continue;
+        }
+        if (!endingReviewUsed) {
+          endingReviewUsed = true;
+          messages.push({
+            role: "user",
+            content: "你准备结束本轮。请对照用户的明确限制、长期目标、最新状态和全部可用工具再检查一次：是否还有安全且有意义的行动？有就继续调用；确实没有，或受到用户明确限制，才总结结束。"
           });
           continue;
         }
@@ -95,7 +116,7 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
     if (!actions.length) throw new Error("农场模型始终没有调用农场工具，请更换支持工具调用的模型");
     messages.push({
       role: "user",
-      content: `已经达到 ${MAX_TOOL_ROUNDS} 轮安全操作上限。不要再调用工具，请直接总结已经完成的操作和仍未完成的部分。`
+      content: `已经达到 ${MAX_TOOL_ROUNDS} 轮安全操作上限。不要再调用工具，请直接总结已完成的操作、长期目标进度、值得分享或邀请伴侣参与的事项，以及仍未完成的部分。`
     });
     const { message } = await requestFarmProvider(config, messages, [], fetchImpl);
     return {
@@ -107,4 +128,4 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
   }
 }
 
-module.exports = { MAX_TOOL_ROUNDS, runFarmAgent, selectTools };
+module.exports = { FARM_AGENT_POLICY_PROMPT, MAX_TOOL_ROUNDS, farmSystemPrompt, runFarmAgent, selectTools };

@@ -291,11 +291,11 @@ const WAKE_FARM_TOOL = {
   type: "function",
   function: {
     name: "farm_agent",
-    description: "让独立的农场代理完成一轮自主经营。仅在你自主醒来并确实想做农场活动时调用；不要把开放式经营意图收窄成只查状态或只做一个最低动作。农场代理会使用另一套专用模型。",
+    description: "让独立的农场代理完成一轮默认授权的自主经营，并持续推进图鉴、探索、资源循环和伴侣合作。仅在你自主醒来并确实想做农场活动时调用；本轮想法只是优先事项，不要收窄成最低动作。农场代理会使用另一套专用模型。",
     parameters: {
       type: "object",
       properties: {
-        instruction: { type: "string", description: "完整说明本轮经营意图、开放授权与必要限制" },
+        instruction: { type: "string", description: "说明本轮优先事项、偏好和必要限制；无需重复申请自主经营授权" },
         context: { type: "string", description: "可选的动机、偏好或限制" }
       },
       required: ["instruction"],

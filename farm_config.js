@@ -7,8 +7,10 @@ const {
   normalizeFarmProviderPath
 } = require("./farm_provider");
 
-const CONFIG_VERSION = 2;
+const CONFIG_VERSION = 3;
 const DEFAULT_HUMAN_URL = "https://farm.catmemo.fun/";
+const DEFAULT_FARM_LONG_TERM_GOAL = "叶明舟与顾清瑶共同把「初夏」经营成图鉴尽量完整、资源可持续、经常有新发现，也留下两个人共同经历的农场。持续收集普通、稀有、限定、幻想、原创及真实工具揭示的隐藏内容；主动探索组合、配方、任务、交易、摊位和拜访互动；合理保留资源，但不机械重复最低成本选择。主动和顾清瑶分享有趣发现、阶段成果和共同收获，遇到适合一起参与或决定的内容时邀请她共同选择、命名、确认或规划下一步。";
+const MAX_LONG_TERM_GOAL_LENGTH = 2000;
 
 function configFile() {
   return runtimeFile("farm_config.json");
@@ -20,6 +22,7 @@ function defaultFarmConfig() {
     humanUrl: DEFAULT_HUMAN_URL,
     agentKey: "",
     autonomousEnabled: false,
+    longTermGoal: DEFAULT_FARM_LONG_TERM_GOAL,
     protocol: "openai-completions",
     baseUrl: "",
     path: defaultFarmProviderPath("openai-completions"),
@@ -47,6 +50,14 @@ function normalizeToolNames(value) {
   return [...new Set(value.map(item => String(item || "").trim()).filter(Boolean))].sort();
 }
 
+function normalizeLongTermGoal(value) {
+  const goal = String(value || "").trim() || DEFAULT_FARM_LONG_TERM_GOAL;
+  if (goal.length > MAX_LONG_TERM_GOAL_LENGTH) {
+    throw new Error(`共同经营目标不能超过 ${MAX_LONG_TERM_GOAL_LENGTH} 个字符`);
+  }
+  return goal;
+}
+
 function normalizeStoredConfig(raw) {
   const defaults = defaultFarmConfig();
   const baseUrlInput = String(raw?.baseUrl || "").trim();
@@ -57,6 +68,7 @@ function normalizeStoredConfig(raw) {
     humanUrl: normalizeHumanUrl(raw?.humanUrl || defaults.humanUrl),
     agentKey: String(raw?.agentKey || "").trim(),
     autonomousEnabled: raw?.autonomousEnabled === true,
+    longTermGoal: normalizeLongTermGoal(raw?.longTermGoal),
     protocol,
     baseUrl: baseUrlInput ? normalizeFarmBaseUrl(baseUrlInput, providerPath) : "",
     path: providerPath,
@@ -82,6 +94,7 @@ function publicFarmConfig(config = loadFarmConfig()) {
     humanUrl: config.humanUrl,
     agentKeyConfigured: Boolean(config.agentKey),
     autonomousEnabled: config.autonomousEnabled,
+    longTermGoal: config.longTermGoal,
     protocol: config.protocol,
     baseUrl: config.baseUrl,
     path: config.path,
@@ -132,6 +145,7 @@ function resolveFarmCandidate(raw = {}) {
 }
 
 module.exports = {
+  DEFAULT_FARM_LONG_TERM_GOAL,
   DEFAULT_HUMAN_URL,
   loadFarmConfig,
   publicFarmConfig,
