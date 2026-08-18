@@ -54,6 +54,8 @@ const {
 const { inspectFarmTools } = require("./farm_mcp");
 const { runFarmAgent } = require("./farm_agent");
 const { discoverFarmModels, requestFarmProvider } = require("./farm_provider");
+const { executeScheduledMessageTool } = require("./scheduled_messages");
+const { processDueScheduledMessages } = require("./scheduled_message_runtime");
 const {
   createOmbreDashboardClient,
   mapOmbreDashboardError,
@@ -1293,6 +1295,65 @@ app.delete("/api/polaris/farm/mcp", async (req, reply) => {
   reply.code(200).send({ ok: true });
 });
 
+const MANAGED_SCHEDULED_MESSAGE_TOOL = {
+  name: "scheduled_message",
+  description: "管理一次性定时主动消息。你可以在用户明确要求时调用，也可以根据聊天自行决定设置；创建时要写给未来的自己一段提示词。到点后云端会使用主动消息模型线路结合最新聊天重新生成，并必定尝试 Bark。",
+  inputSchema: {
+    type: "object",
+    properties: {
+      action: { type: "string", enum: ["create", "list", "update", "cancel"], description: "创建、查询、修改或取消任务" },
+      taskId: { type: "string", description: "修改或取消时使用的任务 ID" },
+      runAt: { type: "string", description: "包含时区的绝对 ISO 日期时间，例如 2026-08-19T09:00:00+08:00" },
+      prompt: { type: "string", description: "写给到点后的自己看的提示词，不是现在就写好的最终消息" }
+    },
+    required: ["action"],
+    additionalProperties: false
+  }
+};
+
+app.post("/api/polaris/scheduled-message/mcp", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  const body = req.body || {};
+  const id = body.id;
+  const sendResult = result => reply.send({ jsonrpc: "2.0", id, result });
+  const sendError = (code, message) => reply.send({ jsonrpc: "2.0", id, error: { code, message } });
+  try {
+    if (body.method === "notifications/initialized") return reply.code(202).send();
+    if (body.method === "initialize") {
+      return sendResult({
+        protocolVersion: "2025-03-26",
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: "polaris-scheduled-message", version: "1.0.0" }
+      });
+    }
+    if (body.method === "ping") return sendResult({});
+    if (body.method === "tools/list") return sendResult({ tools: [MANAGED_SCHEDULED_MESSAGE_TOOL] });
+    if (body.method === "tools/call") {
+      if (body.params?.name !== MANAGED_SCHEDULED_MESSAGE_TOOL.name) {
+        return sendError(-32602, "未知定时消息工具");
+      }
+      const result = executeScheduledMessageTool(body.params?.arguments);
+      return sendResult({
+        content: [{ type: "text", text: result.receipt || JSON.stringify(result) }],
+        structuredContent: result,
+        isError: false
+      });
+    }
+    return sendError(-32601, "不支持的 MCP 方法");
+  } catch (err) {
+    req.log.error({ err, event: "scheduled_message_tool_failed" }, "scheduled message tool failed");
+    return sendResult({
+      content: [{ type: "text", text: `定时消息工具执行失败：${err.message}` }],
+      isError: true
+    });
+  }
+});
+
+app.delete("/api/polaris/scheduled-message/mcp", async (req, reply) => {
+  if (!requireHeartbeatInboxToken(req, reply)) return;
+  reply.code(200).send({ ok: true });
+});
+
 app.get("/api/polaris/heartbeat/prompt", async (req, reply) => {
   if (!requireHeartbeatInboxToken(req, reply)) return;
   try {
@@ -2238,6 +2299,20 @@ if (require.main === module) {
       data_dir_ready: fs.existsSync(DATA_DIR)
     }));
     console.log(`✅ Gateway 运行在 ${address}`);
+    let scheduledPassRunning = false;
+    const runScheduledPass = async () => {
+      if (scheduledPassRunning) return;
+      scheduledPassRunning = true;
+      try {
+        await processDueScheduledMessages({ loadTimeline });
+      } catch (error) {
+        console.error("定时消息任务检查失败:", error.message);
+      } finally {
+        scheduledPassRunning = false;
+      }
+    };
+    setTimeout(runScheduledPass, 1_000);
+    setInterval(runScheduledPass, 10_000);
   });
 }
 

@@ -1,10 +1,10 @@
 require("dotenv").config({ quiet: true });
 const fs = require("fs");
 const path = require("path");
-const { buildNtfyPayload } = require("./ntfy_priority");
 const { eligibility, loadPolicy, savePolicyState } = require("./heartbeat_policy");
 const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_paths");
-const { parseChatCompletionResponse } = require("./upstream_response");
+const { normalizeContentToText, requestHeartbeatModel } = require("./heartbeat_model_client");
+const { sendPushNotification } = require("./push_notification");
 const { messagesForWakeContext } = require("./special_events");
 const { parseWakeDecision, thoughtInboxContent } = require("./wake_decision");
 const { loadHeartbeatModelConfig } = require("./heartbeat_model_config");
@@ -31,14 +31,6 @@ const TIME_ZONE = resolveTimeZone();
 const WEATHER_TIMEOUT_MS = 5000;
 const DIARY_DIR_NAME = process.env.DIARY_DIR || "diary";
 const DIARY_DIR_PATH = runtimeDirectory(DIARY_DIR_NAME, "diary");
-const PUSH_TIMEOUT_MS = readPositiveTimeout("PUSH_TIMEOUT_MS", 15_000);
-const WAKE_UPSTREAM_TIMEOUT_MS = readPositiveTimeout("WAKE_UPSTREAM_TIMEOUT_MS", 300_000);
-
-function readPositiveTimeout(key, fallback) {
-  const value = Number(process.env[key]);
-  return Number.isFinite(value) && value >= 1000 ? Math.floor(value) : fallback;
-}
-
 function readNumberEnv(key, fallback, options = {}) {
   const value = Number(process.env[key]);
   const min = options.min ?? -Infinity;
@@ -92,103 +84,6 @@ function appendDiaryEntry(content) {
   fs.appendFileSync(diaryFile, entry, "utf-8");
   console.log(`已保存日记：${diaryFile}`);
   return true;
-}
-
-// 批注 2026-07-11：推送层扩展为 Bark/ntfy；默认仍走 Bark，保护旧部署不改 .env 也能继续运行。
-async function sendPushNotification({ title, body }) {
-  const provider = (process.env.PUSH_PROVIDER || "bark").trim().toLowerCase();
-
-  if (provider === "ntfy") {
-    const topic = String(process.env.NTFY_TOPIC || "").trim();
-    if (!topic) return { ok: false, providerLabel: "ntfy", reason: "NTFY_TOPIC 未配置" };
-
-    const server = (process.env.NTFY_SERVER_URL || "https://ntfy.sh").replace(/\/+$/, "");
-    const headers = {
-      "Content-Type": "application/json"
-    };
-    if (process.env.NTFY_TOKEN) headers.Authorization = `Bearer ${process.env.NTFY_TOKEN}`;
-    const payload = buildNtfyPayload({
-      topic,
-      title,
-      message: body,
-      priority: process.env.NTFY_PRIORITY,
-      tags: process.env.NTFY_TAGS
-    });
-
-    const response = await fetch(server, {
-      method: "POST",
-      signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
-      headers,
-      body: JSON.stringify(payload)
-    });
-    const responseText = await response.text();
-    if (!response.ok) {
-      return { ok: false, providerLabel: "ntfy", reason: responseText || `HTTP ${response.status}` };
-    }
-    return { ok: true, providerLabel: "ntfy" };
-  }
-
-  if (provider !== "bark") {
-    return { ok: false, providerLabel: provider || "未知渠道", reason: `不支持的 PUSH_PROVIDER：${provider}` };
-  }
-
-  if (!process.env.BARK_KEY) {
-    return { ok: false, providerLabel: "Bark", reason: "Bark Key 未配置" };
-  }
-
-  const barkPayload = {
-    title,
-    body,
-    device_key: process.env.BARK_KEY,
-    icon: process.env.CUSTOM_ICON_URL
-  };
-
-  const response = await fetch("https://api.day.app/push", {
-    method: "POST",
-    signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(barkPayload)
-  });
-
-  const responseText = await response.text();
-  let result = {};
-  try {
-    result = JSON.parse(responseText);
-  } catch {}
-  console.log("\nBark Result:\n", result || responseText);
-
-  if (!response.ok || (result.code && result.code !== 200)) {
-    return { ok: false, providerLabel: "Bark", reason: result.message || `HTTP ${response.status}` };
-  }
-  return { ok: true, providerLabel: "Bark" };
-}
-
-function normalizeContentToText(content) {
-  if (typeof content === "string") return content;
-  if (content == null) return "";
-
-  if (Array.isArray(content)) {
-    return content
-      .map(part => {
-        if (typeof part === "string") return part;
-        if (!part || typeof part !== "object") return "";
-        const type = typeof part.type === "string" ? part.type.toLowerCase() : "";
-        if (type === "text" || type === "input_text") return part.text || part.content || "";
-        if (part.image_url || type.includes("image")) return "[图片]";
-        if (part.file || type.includes("file")) return "[文件]";
-        return "";
-      })
-      .filter(Boolean)
-      .join("\n");
-  }
-
-  if (content && typeof content === "object") {
-    const type = typeof content.type === "string" ? content.type.toLowerCase() : "";
-    if (content.image_url || type.includes("image")) return "[图片]";
-    if (content.file || type.includes("file")) return "[文件]";
-  }
-
-  return "[非文本内容]";
 }
 
 function summarizeWakeMessages(messages = []) {
@@ -390,41 +285,6 @@ function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
 - 不联系时必须承接系统列出的此前心理活动，只写新的变化、新观察或新决定；不得复述、改写或换词重演已有内容。
 - 如果你想写日记，可以额外输出 [DIARY]...[/DIARY]。只有想写时才写，不必每次都写。
 `;
-}
-
-async function requestHeartbeatModel(heartbeatModel, messages, tools = []) {
-  const response = await fetch(heartbeatModel.apiUrl, {
-    method: "POST",
-    signal: AbortSignal.timeout(WAKE_UPSTREAM_TIMEOUT_MS),
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${heartbeatModel.apiKey}`
-    },
-    body: JSON.stringify({
-      model: heartbeatModel.model,
-      messages,
-      temperature: 0.8,
-      top_p: 0.95,
-      stream: false,
-      ...(tools.length ? { tools, tool_choice: "auto" } : {})
-    })
-  });
-
-  const responseText = await response.text();
-  let data;
-  try {
-    data = parseChatCompletionResponse(responseText, response.headers.get("content-type") || "");
-  } catch (error) {
-    throw new Error(`模型响应无法解析（HTTP ${response.status}）：${error.message || responseText.slice(0, 300)}`);
-  }
-  if (!response.ok) {
-    throw new Error(`模型请求失败（HTTP ${response.status}）：${responseText.slice(0, 300)}`);
-  }
-  const message = data.choices?.[0]?.message;
-  if (!message) throw new Error("主动消息模型没有返回 message");
-  const text = normalizeContentToText(message.content).trim();
-  console.log(JSON.stringify({ choices: Array.isArray(data.choices) ? data.choices.length : 0, ai_text_chars: text.length }));
-  return message;
 }
 
 const WAKE_FARM_TOOL = {
