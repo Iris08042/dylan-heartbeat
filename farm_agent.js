@@ -52,7 +52,7 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
     const messages = [
       {
         role: "system",
-        content: "你是《无尽夏》里的农场经营代理。只处理用户给出的农场任务；必须先调用可用工具查看真实状态，再谨慎行动；不猜测数值，不使用未提供的工具，也不能在没有调用工具时声称任务已完成。不要重复相同的查看或操作，达到原任务后立即停止调用工具。完成后用简短中文说明做了什么和结果。"
+        content: "你是《无尽夏》里的农场经营代理。只处理用户给出的农场任务；每个任务最多查看一次真实状态，status 成功后绝不能再次 status，必须转去执行原任务或直接总结。farm 工具常用 action：status 查看、water 浇水、harvest 收获。不猜测数值，不使用未提供的工具，也不能在没有调用工具时声称任务已完成。达到原任务后立即停止调用工具，并用简短中文说明做了什么和结果。"
       },
       {
         role: "user",
@@ -60,6 +60,7 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
       }
     ];
 
+    let lastActionKey = "";
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
       const { message } = await requestFarmProvider(config, messages, tools, fetchImpl);
       const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
@@ -86,8 +87,18 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
         if (!allowed.has(name)) throw new Error(`农场模型请求了未授权工具：${name || "未知"}`);
         let args;
         try { args = JSON.parse(call?.function?.arguments || "{}"); } catch { throw new Error(`工具 ${name} 的参数不是有效 JSON`); }
+        const actionKey = `${name}:${JSON.stringify(args)}`;
+        if (actionKey === lastActionKey) {
+          messages.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: `拒绝重复执行：${JSON.stringify(args)} 刚刚已经成功调用。不要再次查看相同状态；请根据原任务“${task.slice(0, 200)}”选择不同的下一步动作，浇水使用 action=water，收获使用 action=harvest；若原任务已完成则直接总结。`
+          });
+          continue;
+        }
         const result = await client.callTool(name, args);
         const resultText = toolResultText(result);
+        lastActionKey = actionKey;
         actions.push({ name, arguments: args, result: resultText.slice(0, 1000) });
         messages.push({ role: "tool", tool_call_id: call.id, content: resultText });
       }
