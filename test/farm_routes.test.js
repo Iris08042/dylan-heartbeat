@@ -48,6 +48,8 @@ test("farm routes keep secrets private and expose one managed MCP tool", async (
       payload: { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }
     });
     assert.deepEqual(list.json().result.tools.map(tool => tool.name), ["farm_agent"]);
+    assert.match(list.json().result.tools[0].description, /继续完成当前合理事项/);
+    assert.match(list.json().result.tools[0].inputSchema.properties.instruction.description, /开放授权/);
 
     const unauthenticated = await server.app.inject({
       method: "GET",

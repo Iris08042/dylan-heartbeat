@@ -1232,11 +1232,11 @@ app.post("/api/polaris/farm/test-connection", async (req, reply) => {
 
 const MANAGED_FARM_TOOL = {
   name: "farm_agent",
-  description: "让《无尽夏》的专用农场代理查看或经营我们的农场。具体农场工具与专用模型费用均由农场独立配置承担。",
+  description: "委托《无尽夏》的专用农场代理自主查看和经营我们的农场。用户说“去看看”“打理一下”“你看着办”等开放请求时，保留这份自主经营授权，让代理查看后继续完成当前合理事项，不要擅自收窄成只查状态或只做一个最低动作；只有用户明确说只看、别操作时才限制为查看。具体农场工具与专用模型费用均由农场独立配置承担。",
   inputSchema: {
     type: "object",
     properties: {
-      instruction: { type: "string", description: "要完成的具体农场任务" },
+      instruction: { type: "string", description: "完整保留用户的经营意图、开放授权与明确限制；不要把开放式委托改写成单一查询或最低限度动作" },
       context: { type: "string", description: "可选的简短背景或偏好" }
     },
     required: ["instruction"],

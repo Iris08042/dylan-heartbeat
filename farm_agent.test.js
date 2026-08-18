@@ -62,6 +62,10 @@ test("farm agent delegates model tool calls to the upstream MCP", async () => {
   assert.equal(result.actions[0].name, "farm_status");
   assert.ok(requests.some(item => item.body?.method === "tools/call"));
   assert.ok(requests.some(item => item.url === "https://models.example.com/v1/chat/completions"));
+  const firstModelRequest = requests.find(item => item.url === "https://models.example.com/v1/chat/completions");
+  assert.match(firstModelRequest.body.messages[0].content, /开放式委托/);
+  assert.match(firstModelRequest.body.messages[0].content, /不要机械地总选最便宜或默认选项/);
+  assert.match(firstModelRequest.body.messages[0].content, /明确要求只查看、不要操作/);
 });
 
 test("farm agent corrects a model that answers before using a farm tool", async () => {
