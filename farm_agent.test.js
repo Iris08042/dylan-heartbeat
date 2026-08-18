@@ -153,7 +153,7 @@ test("farm agent safely summarizes completed work at the operation limit", async
   assert.equal(modelRound, 7);
 });
 
-test("farm agent blocks a repeated status call and proceeds to water", async () => {
+test("farm agent leaves repeated actions to the model within the safety limit", async () => {
   let modelRound = 0;
   let farmCalls = 0;
   const fetchImpl = async (url, init) => {
@@ -197,6 +197,6 @@ test("farm agent blocks a repeated status call and proceeds to water", async () 
   });
 
   assert.equal(result.content, "已经查看状态并完成浇水。");
-  assert.deepEqual(result.actions.map(action => action.arguments.action), ["status", "water"]);
-  assert.equal(farmCalls, 2);
+  assert.deepEqual(result.actions.map(action => action.arguments.action), ["status", "status", "water"]);
+  assert.equal(farmCalls, 3);
 });

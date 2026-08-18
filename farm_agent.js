@@ -60,7 +60,6 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
       }
     ];
 
-    let lastActionKey = "";
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
       const { message } = await requestFarmProvider(config, messages, tools, fetchImpl);
       const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
@@ -87,18 +86,8 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
         if (!allowed.has(name)) throw new Error(`农场模型请求了未授权工具：${name || "未知"}`);
         let args;
         try { args = JSON.parse(call?.function?.arguments || "{}"); } catch { throw new Error(`工具 ${name} 的参数不是有效 JSON`); }
-        const actionKey = `${name}:${JSON.stringify(args)}`;
-        if (actionKey === lastActionKey) {
-          messages.push({
-            role: "tool",
-            tool_call_id: call.id,
-            content: `拒绝重复执行：${JSON.stringify(args)} 刚刚已经成功调用。请根据原始任务“${task.slice(0, 200)}”和已有工具结果，自行选择一个由工具说明允许、能够推进目标且尚未完成的下一步动作；若目标已达成或没有安全有效的下一步，则直接总结。`
-          });
-          continue;
-        }
         const result = await client.callTool(name, args);
         const resultText = toolResultText(result);
-        lastActionKey = actionKey;
         actions.push({ name, arguments: args, result: resultText.slice(0, 1000) });
         messages.push({ role: "tool", tool_call_id: call.id, content: resultText });
       }
