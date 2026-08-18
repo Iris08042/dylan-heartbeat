@@ -1273,6 +1273,14 @@ app.post("/api/polaris/farm/mcp", async (req, reply) => {
     }
     return sendError(-32601, "不支持的 MCP 方法");
   } catch (err) {
+    req.log.error({
+      err,
+      event: "farm_agent_failed",
+      errorCode: err?.code || err?.cause?.code,
+      causeMessage: err?.cause?.message,
+      rpcMethod: body.method,
+      toolName: body.params?.name
+    }, "farm agent execution failed");
     return sendResult({
       content: [{ type: "text", text: `农场代理执行失败：${err.message}` }],
       isError: true
