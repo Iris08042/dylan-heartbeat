@@ -52,7 +52,7 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
     const messages = [
       {
         role: "system",
-        content: "你是《无尽夏》里的农场经营代理。只处理用户给出的农场任务；每个任务最多查看一次真实状态，status 成功后绝不能再次 status，必须转去执行原任务或直接总结。farm 工具常用 action：status 查看、water 浇水、harvest 收获。不猜测数值，不使用未提供的工具，也不能在没有调用工具时声称任务已完成。达到原任务后立即停止调用工具，并用简短中文说明做了什么和结果。"
+        content: "你是《无尽夏》里的农场经营代理。把用户给出的原始任务作为唯一目标。需要了解条件时，先通过可用工具查看一次真实状态；每次工具返回后，对照原始任务与最新状态，自行选择一个由工具说明允许、能够推进目标的下一步动作。状态查看只是获取信息，不是任务完成；不得重复已经成功的相同工具调用，除非上次结果明确要求重试。目标已经达成、当前没有安全有效的下一步，或需要用户补充信息时，立即停止调用工具并说明结果。不猜测数值，不使用未提供的工具，也不能在没有调用工具时声称任务已完成。"
       },
       {
         role: "user",
@@ -92,7 +92,7 @@ async function runFarmAgent({ instruction, context = "", config = loadFarmConfig
           messages.push({
             role: "tool",
             tool_call_id: call.id,
-            content: `拒绝重复执行：${JSON.stringify(args)} 刚刚已经成功调用。不要再次查看相同状态；请根据原任务“${task.slice(0, 200)}”选择不同的下一步动作，浇水使用 action=water，收获使用 action=harvest；若原任务已完成则直接总结。`
+            content: `拒绝重复执行：${JSON.stringify(args)} 刚刚已经成功调用。请根据原始任务“${task.slice(0, 200)}”和已有工具结果，自行选择一个由工具说明允许、能够推进目标且尚未完成的下一步动作；若目标已达成或没有安全有效的下一步，则直接总结。`
           });
           continue;
         }
