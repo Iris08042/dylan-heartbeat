@@ -56,6 +56,8 @@ test("accepts authenticated HAE uploads and exposes one health MCP tool", async 
       payload: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }
     });
     assert.deepEqual(list.json().result.tools.map(tool => tool.name), ["health_now"]);
+    assert.match(list.json().result.tools[0].description, /可优先查看一次辅助判断/);
+    assert.match(list.json().result.tools[0].description, /不必机械调用/);
 
     const call = await server.app.inject({
       method: "POST",

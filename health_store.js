@@ -11,7 +11,7 @@ const METRICS = {
 };
 
 const HEALTH_UPLOAD_CURRENT_MS = 15 * 60 * 1000;
-const HEALTH_NOW_DESCRIPTION = "读取服务器最近收到的 Apple Health 数据快照，包括步数、心率、心率变异性、静息心率、步行平均心率和睡眠。它不会现场测量。以 HAE 到达服务器的同步时间判断新旧：15 分钟内是当前数据，超过 15 分钟是旧数据；无论新旧都返回，并必须明确说明同步时间。每项指标还带各自的实际采样时间。";
+const HEALTH_NOW_DESCRIPTION = "读取用户本人近期健康数据。聊到用户的睡眠、疲倦、压力、恢复、心率、HRV 或活动量时，可优先查看一次辅助判断，但不必机械调用。";
 
 function healthFile() {
   return runtimeFile("health_data.json");
